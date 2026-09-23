@@ -1,24 +1,38 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 
+#include "crux/platform/socket.hpp"
+
 namespace crux {
+
+class TcpConnection;
 
 class TcpListener {
 public:
     explicit TcpListener(std::uint16_t port);
     ~TcpListener();
 
-    void start();
+    TcpConnection accept();
+
+private:
+    platform::Socket socket_;
 };
 
 class TcpConnection {
 public:
-    TcpConnection();
+    explicit TcpConnection(platform::Socket socket);
     ~TcpConnection();
 
-    void send();
-    void receive();
+    TcpConnection(const TcpConnection&) = delete;
+    TcpConnection& operator=(const TcpConnection&) = delete;
+
+    void send(const char* data, std::size_t size);
+    std::size_t receive(char* buffer, std::size_t size);
+
+private:
+    platform::Socket socket_;
 };
 
 } // namespace crux

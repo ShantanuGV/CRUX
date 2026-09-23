@@ -2,32 +2,31 @@
 
 namespace crux {
 
-TcpListener::TcpListener(std::uint16_t port) {
-    // TCP listener initialization will go here.
+TcpListener::TcpListener(std::uint16_t port)
+    : socket_(platform::INVALID_SOCKET_VALUE) {
+    (void)port;
 }
 
 TcpListener::~TcpListener() {
-    // Socket cleanup will go here.
 }
 
-void TcpListener::start() {
-    // Start listening for connections.
-}
-
-TcpConnection::TcpConnection() {
-    // Connection initialization.
+TcpConnection::TcpConnection(platform::Socket socket)
+    : socket_(socket) {
 }
 
 TcpConnection::~TcpConnection() {
-    // Connection cleanup.
 }
 
-void TcpConnection::send() {
-    // Sending will be implemented here.
+void TcpConnection::send(const char* data, std::size_t size) {
+    (void)data;
+    (void)size;
 }
 
-void TcpConnection::receive() {
-    // Receiving will be implemented here.
+std::size_t TcpConnection::receive(char* buffer, std::size_t size) {
+    (void)buffer;
+    (void)size;
+
+    return 0;
 }
 
 } // namespace crux
