@@ -85,3 +85,19 @@ else()
 endif()
 
 add_test(NAME crux_tests COMMAND crux_tests)
+
+# ─── Install ────────────────────────────────────────────────
+
+install(TARGETS crux
+    RUNTIME DESTINATION bin
+)
+
+# Static linking option for portable binaries
+option(CRUX_STATIC "Build a statically linked binary" OFF)
+if(CRUX_STATIC)
+    if(WIN32 AND MINGW)
+        target_link_options(crux PRIVATE -static -static-libgcc -static-libstdc++)
+    elseif(UNIX)
+        target_link_options(crux PRIVATE -static)
+    endif()
+endif()

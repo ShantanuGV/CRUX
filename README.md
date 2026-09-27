@@ -17,6 +17,51 @@ Just two endpoints, a protocol, and a direct connection.
 
 ---
 
+## Quick Install
+
+### Windows (PowerShell)
+
+```powershell
+irm https://raw.githubusercontent.com/ShantanuGV/CRUX/main/install.ps1 | iex
+```
+
+### Linux / macOS
+
+```bash
+curl -sSL https://raw.githubusercontent.com/ShantanuGV/CRUX/main/install.sh | bash
+```
+
+After installation, open a **new terminal** and type:
+
+```
+crux
+```
+
+That's it. CRUX is now a system command.
+
+### Prerequisites
+
+The installer will check for these automatically:
+
+| Tool | Windows | Linux |
+|------|---------|-------|
+| Git | [git-scm.com](https://git-scm.com/download/win) | `sudo apt install git` |
+| CMake | [cmake.org](https://cmake.org/download/) or MSYS2 | `sudo apt install cmake` |
+| C++ Compiler | [MSYS2](https://www.msys2.org/) (MinGW-w64) | `sudo apt install g++` |
+| Make | Comes with MSYS2 | `sudo apt install make` |
+
+### Uninstall
+
+```powershell
+# Windows
+irm https://raw.githubusercontent.com/ShantanuGV/CRUX/main/uninstall.ps1 | iex
+
+# Linux
+rm ~/.local/bin/crux
+```
+
+---
+
 ## Features (V1)
 
 - **Direct P2P messaging** — no central server, no cloud, no intermediaries
@@ -25,12 +70,31 @@ Just two endpoints, a protocol, and a direct connection.
 - **Protocol handshake** — HELLO → REQUEST → ACCEPT/REJECT → CHAT → CLOSE
 - **Connection state machine** with validated transitions
 - **Futuristic terminal UI** with ANSI styling
-- **Address book** — save peers with nicknames and addresses
+- **Address book** — save peers with nicknames and addresses (persisted automatically)
 - **Persistent settings** — configurable port and nickname
 - **No message persistence** — messages exist only in memory during a chat session
 - **Clean disconnect** handling
 - **Duplicate connection** detection and prevention
 - **Comprehensive error handling** — invalid addresses, timeouts, malformed packets, etc.
+
+---
+
+## What Gets Saved
+
+CRUX saves **only your contacts (people)**:
+- Nickname, IP address, and port for each peer
+- Your settings (listening port and nickname)
+
+CRUX **never** saves:
+- Messages
+- Chat history
+- Any message content
+
+Your contacts are stored locally:
+- **Windows:** `%APPDATA%\crux\peers.conf`
+- **Linux:** `~/.config/crux/peers.conf`
+
+Messages exist only in memory while a chat session is active. When you close the chat, they're gone forever.
 
 ---
 
@@ -54,18 +118,16 @@ The application never directly calls `socket()`, `connect()`, `bind()`, `listen(
 
 ---
 
-## Building
+## Building from Source
 
-### Requirements
-
-- C++20 compiler (GCC 10+, Clang 12+, MSVC 2019+, or MinGW-w64)
-- CMake 3.16+
+If you prefer to build manually instead of using the install scripts:
 
 ### Linux
 
 ```bash
 cmake -S . -B build
 cmake --build build
+sudo cmake --install build    # Installs to /usr/local/bin
 ```
 
 ### Windows (MinGW / MSYS2)
@@ -73,6 +135,7 @@ cmake --build build
 ```powershell
 cmake -S . -B build -G "MinGW Makefiles"
 cmake --build build
+cmake --install build --prefix "$env:LOCALAPPDATA\Programs\crux"
 ```
 
 ### Windows (Visual Studio)
@@ -92,13 +155,13 @@ The executable is built at `build/crux` (Linux) or `build/crux.exe` (Windows).
 
 ```bash
 # Default port (5623)
-./crux
+crux
 
 # Custom port
-./crux --port 8080
+crux --port 8080
 
 # Help
-./crux --help
+crux --help
 ```
 
 ### Main Menu
@@ -132,12 +195,12 @@ Navigate to **PEOPLE → Add** and enter:
 
 Terminal 1:
 ```bash
-./crux --port 5623
+crux --port 5623
 ```
 
 Terminal 2:
 ```bash
-./crux --port 5624
+crux --port 5624
 ```
 
 In Terminal 2, add a peer with address `127.0.0.1` and port `5623`, then start a chat. In Terminal 1, go to **REQUESTS** and accept.
@@ -178,24 +241,27 @@ Full protocol specification: [docs/protocol.md](docs/protocol.md)
 CRUX/
 ├── CMakeLists.txt
 ├── README.md
+├── install.ps1               # Windows installer
+├── install.sh                # Linux/macOS installer
+├── uninstall.ps1             # Windows uninstaller
 ├── docs/
 │   └── protocol.md           # Wire protocol specification
 ├── include/crux/
 │   ├── core/
-│   │   ├── application.hpp    # Main application orchestration
-│   │   ├── peer.hpp           # Peer data & address book
-│   │   ├── settings.hpp       # User settings
-│   │   └── state.hpp          # Connection state machine
+│   │   ├── application.hpp   # Main application orchestration
+│   │   ├── peer.hpp          # Peer data & address book
+│   │   ├── settings.hpp      # User settings
+│   │   └── state.hpp         # Connection state machine
 │   ├── network/
-│   │   └── connection.hpp     # High-level Connection & Listener
+│   │   └── connection.hpp    # High-level Connection & Listener
 │   ├── platform/
-│   │   └── socket.hpp         # Platform socket abstraction
+│   │   └── socket.hpp        # Platform socket abstraction
 │   ├── protocol/
-│   │   └── frame.hpp          # Wire protocol frame format
+│   │   └── frame.hpp         # Wire protocol frame format
 │   ├── storage/
-│   │   └── storage.hpp        # Local file persistence
+│   │   └── storage.hpp       # Local file persistence
 │   └── ui/
-│       └── terminal.hpp       # Terminal UI system
+│       └── terminal.hpp      # Terminal UI system
 ├── src/
 │   ├── main.cpp
 │   ├── core/
@@ -204,16 +270,16 @@ CRUX/
 │   ├── storage/
 │   ├── ui/
 │   └── platform/
-│       ├── linux/socket.cpp   # POSIX socket implementation
-│       └── windows/socket.cpp # WinSock2 implementation
+│       ├── linux/socket.cpp  # POSIX socket implementation
+│       └── windows/socket.cpp# WinSock2 implementation
 └── tests/
-    ├── test_framework.hpp     # Minimal test framework
+    ├── test_framework.hpp    # Minimal test framework
     ├── test_main.cpp
-    ├── test_frame.cpp         # Protocol frame tests
-    ├── test_peer.cpp          # Peer management tests
-    ├── test_state.cpp         # State machine tests
-    ├── test_storage.cpp       # Persistence tests
-    └── test_network.cpp       # Network integration tests
+    ├── test_frame.cpp        # Protocol frame tests
+    ├── test_peer.cpp         # Peer management tests
+    ├── test_state.cpp        # State machine tests
+    ├── test_storage.cpp      # Persistence tests
+    └── test_network.cpp      # Network integration tests
 ```
 
 ---
@@ -230,23 +296,6 @@ CRUX/
 **Do not use CRUX v1 for sensitive communications.**
 
 Future versions will implement end-to-end encryption.
-
----
-
-## Local Storage
-
-CRUX persists only:
-- **Peers** (nickname, address, port) → `peers.conf`
-- **Settings** (port, nickname) → `settings.conf`
-
-CRUX **never** persists:
-- Messages
-- Chat history
-- Message content
-
-Config location:
-- **Linux:** `$XDG_CONFIG_HOME/crux/` or `~/.config/crux/`
-- **Windows:** `%APPDATA%\crux\`
 
 ---
 
