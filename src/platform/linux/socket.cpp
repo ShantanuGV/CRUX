@@ -136,6 +136,83 @@ std::string socket_error_string() {
     return std::string(strerror(errno));
 }
 
+// ─── UDP support ────────────────────────────────────────────
+
+Socket socket_create_udp() {
+    return ::socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+}
+
+bool socket_set_broadcast(Socket s) {
+    int opt = 1;
+    return setsockopt(s, SOL_SOCKET, SO_BROADCAST, &opt, sizeof(opt)) == 0;
+}
+
+bool socket_join_multicast(Socket s, const std::string& group) {
+    ip_mreq mreq{};
+    inet_pton(AF_INET, group.c_str(), &mreq.imr_multiaddr);
+    mreq.imr_interface.s_addr = INADDR_ANY;
+    return setsockopt(s, IPPROTO_IP, IP_ADD_MEMBERSHIP, &mreq, sizeof(mreq)) == 0;
+}
+
+int socket_sendto(Socket s, const void* data, std::size_t len,
+                  const std::string& host, std::uint16_t port) {
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(port);
+    inet_pton(AF_INET, host.c_str(), &addr.sin_addr);
+    return static_cast<int>(::sendto(s, data, len, 0,
+                    reinterpret_cast<sockaddr*>(&addr), sizeof(addr)));
+}
+
+int socket_recvfrom(Socket s, void* buf, std::size_t len,
+                    std::string& out_addr, std::uint16_t& out_port,
+                    int timeout_ms) {
+    pollfd pfd{};
+    pfd.fd = s;
+    pfd.events = POLLIN;
+    int sel = ::poll(&pfd, 1, timeout_ms);
+    if (sel <= 0) return sel;
+
+    sockaddr_in from{};
+    socklen_t fromlen = sizeof(from);
+    int n = static_cast<int>(::recvfrom(s, buf, len, 0,
+                       reinterpret_cast<sockaddr*>(&from), &fromlen));
+    if (n > 0) {
+        char addrbuf[INET_ADDRSTRLEN]{};
+        inet_ntop(AF_INET, &from.sin_addr, addrbuf, sizeof(addrbuf));
+        out_addr = addrbuf;
+        out_port = ntohs(from.sin_port);
+    }
+    return n;
+}
+
+std::string get_local_ip() {
+    int s = ::socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if (s < 0) return "127.0.0.1";
+
+    sockaddr_in remote{};
+    remote.sin_family = AF_INET;
+    inet_pton(AF_INET, "8.8.8.8", &remote.sin_addr);
+    remote.sin_port = htons(53);
+
+    if (::connect(s, reinterpret_cast<sockaddr*>(&remote), sizeof(remote)) != 0) {
+        ::close(s);
+        return "127.0.0.1";
+    }
+
+    sockaddr_in local{};
+    socklen_t len = sizeof(local);
+    if (::getsockname(s, reinterpret_cast<sockaddr*>(&local), &len) != 0) {
+        ::close(s);
+        return "127.0.0.1";
+    }
+
+    char buf[INET_ADDRSTRLEN]{};
+    inet_ntop(AF_INET, &local.sin_addr, buf, sizeof(buf));
+    ::close(s);
+    return std::string(buf);
+}
+
 } // namespace crux::platform
 
 #endif

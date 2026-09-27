@@ -64,4 +64,19 @@ int socket_poll_read(Socket s, int timeout_ms);
 // Error description
 std::string socket_error_string();
 
+// ─── UDP support (for UPnP / NAT traversal) ────────────────
+
+Socket socket_create_udp();
+bool   socket_set_broadcast(Socket s);
+bool   socket_join_multicast(Socket s, const std::string& group);
+
+int socket_sendto(Socket s, const void* data, std::size_t len,
+                  const std::string& host, std::uint16_t port);
+int socket_recvfrom(Socket s, void* buf, std::size_t len,
+                    std::string& out_addr, std::uint16_t& out_port,
+                    int timeout_ms);
+
+// Discover the local IP by opening a UDP socket to an external address
+std::string get_local_ip();
+
 } // namespace crux::platform

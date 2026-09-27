@@ -21,6 +21,7 @@ set(CRUX_SOURCES
     src/protocol/frame.cpp
     src/storage/storage.cpp
     src/ui/terminal.cpp
+    src/nat/nat.cpp
 )
 
 # Platform-specific sources
@@ -62,6 +63,7 @@ set(TEST_SOURCES
     src/protocol/frame.cpp
     src/storage/storage.cpp
     src/network/connection.cpp
+    src/nat/nat.cpp
 )
 
 if(WIN32)

@@ -156,6 +156,91 @@ std::string socket_error_string() {
     return std::string(buf);
 }
 
+// ─── UDP support ────────────────────────────────────────────
+
+Socket socket_create_udp() {
+    return ::socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+}
+
+bool socket_set_broadcast(Socket s) {
+    int opt = 1;
+    return setsockopt(s, SOL_SOCKET, SO_BROADCAST,
+                      reinterpret_cast<const char*>(&opt), sizeof(opt)) == 0;
+}
+
+bool socket_join_multicast(Socket s, const std::string& group) {
+    ip_mreq mreq{};
+    inet_pton(AF_INET, group.c_str(), &mreq.imr_multiaddr);
+    mreq.imr_interface.s_addr = INADDR_ANY;
+    return setsockopt(s, IPPROTO_IP, IP_ADD_MEMBERSHIP,
+                      reinterpret_cast<const char*>(&mreq), sizeof(mreq)) == 0;
+}
+
+int socket_sendto(Socket s, const void* data, std::size_t len,
+                  const std::string& host, std::uint16_t port) {
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(port);
+    inet_pton(AF_INET, host.c_str(), &addr.sin_addr);
+    return ::sendto(s, static_cast<const char*>(data), static_cast<int>(len), 0,
+                    reinterpret_cast<sockaddr*>(&addr), sizeof(addr));
+}
+
+int socket_recvfrom(Socket s, void* buf, std::size_t len,
+                    std::string& out_addr, std::uint16_t& out_port,
+                    int timeout_ms) {
+    // Poll first
+    fd_set read_fds;
+    FD_ZERO(&read_fds);
+    FD_SET(s, &read_fds);
+    timeval tv;
+    tv.tv_sec = timeout_ms / 1000;
+    tv.tv_usec = (timeout_ms % 1000) * 1000;
+    int sel = ::select(0, &read_fds, nullptr, nullptr, &tv);
+    if (sel <= 0) return sel;
+
+    sockaddr_in from{};
+    int fromlen = sizeof(from);
+    int n = ::recvfrom(s, static_cast<char*>(buf), static_cast<int>(len), 0,
+                       reinterpret_cast<sockaddr*>(&from), &fromlen);
+    if (n > 0) {
+        char addrbuf[INET_ADDRSTRLEN]{};
+        inet_ntop(AF_INET, &from.sin_addr, addrbuf, sizeof(addrbuf));
+        out_addr = addrbuf;
+        out_port = ntohs(from.sin_port);
+    }
+    return n;
+}
+
+std::string get_local_ip() {
+    // Create a UDP socket and "connect" to 8.8.8.8:53
+    // This doesn't send any data — it just causes the OS to choose the right interface
+    SOCKET s = ::socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if (s == INVALID_SOCKET) return "127.0.0.1";
+
+    sockaddr_in remote{};
+    remote.sin_family = AF_INET;
+    inet_pton(AF_INET, "8.8.8.8", &remote.sin_addr);
+    remote.sin_port = htons(53);
+
+    if (::connect(s, reinterpret_cast<sockaddr*>(&remote), sizeof(remote)) != 0) {
+        ::closesocket(s);
+        return "127.0.0.1";
+    }
+
+    sockaddr_in local{};
+    int len = sizeof(local);
+    if (::getsockname(s, reinterpret_cast<sockaddr*>(&local), &len) != 0) {
+        ::closesocket(s);
+        return "127.0.0.1";
+    }
+
+    char buf[INET_ADDRSTRLEN]{};
+    inet_ntop(AF_INET, &local.sin_addr, buf, sizeof(buf));
+    ::closesocket(s);
+    return std::string(buf);
+}
+
 } // namespace crux::platform
 
 #endif

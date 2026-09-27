@@ -75,6 +75,53 @@ int Application::run(int argc, char* argv[]) {
     running_.store(true);
     listener_thread_ = std::thread(&Application::listener_thread_func, this);
 
+    // NAT Traversal — discover public IP and set up port forwarding
+    ui::clear_screen();
+    ui::draw_header("N A T   S E T U P");
+    std::cout << "\n";
+    std::cout << ui::ansi::DIM << "  Discovering network configuration...\n" << ui::ansi::RESET;
+    std::cout << ui::ansi::DIM << "  Detecting public IP..." << ui::ansi::RESET << std::flush;
+
+    auto nat_status = nat_.setup(settings_.listen_port);
+
+    std::cout << "\n";
+    ui::print_info("Local IP    ", nat_status.local_ip);
+    if (!nat_status.public_ip.empty()) {
+        ui::print_info("Public IP   ", nat_status.public_ip);
+    } else {
+        std::cout << ui::ansi::DIM << ui::ansi::YELLOW
+                  << "  Could not detect public IP (no internet?)\n"
+                  << ui::ansi::RESET;
+    }
+    if (nat_status.upnp_available) {
+        ui::print_info("UPnP Gateway", nat_status.gateway_ip);
+        if (nat_status.port_forwarded) {
+            std::cout << ui::ansi::BRIGHT_GREEN << "  \xe2\x9c\x93 Port "
+                      << nat_status.external_port
+                      << " forwarded automatically via UPnP\n" << ui::ansi::RESET;
+        } else {
+            std::cout << ui::ansi::YELLOW << "  \xe2\x9c\x97 UPnP port forwarding failed: "
+                      << nat_status.error << "\n" << ui::ansi::RESET;
+        }
+    } else {
+        std::cout << ui::ansi::DIM << ui::ansi::YELLOW
+                  << "  No UPnP gateway found. For internet access, forward port "
+                  << settings_.listen_port << " on your router.\n"
+                  << ui::ansi::RESET;
+    }
+    std::cout << "\n";
+    if (!nat_status.public_ip.empty() && nat_status.port_forwarded) {
+        std::cout << ui::ansi::BOLD << ui::ansi::WHITE
+                  << "  Share this address with friends:\n"
+                  << ui::ansi::RESET;
+        std::cout << ui::ansi::BOLD << ui::ansi::BRIGHT_CYAN
+                  << "    " << nat_status.public_ip << ":"
+                  << nat_status.external_port << "\n\n"
+                  << ui::ansi::RESET;
+    }
+    ui::print_prompt("Press Enter to continue...");
+    ui::read_line();
+
     // Main loop
     while (running_.load()) {
         show_main_menu();
@@ -83,6 +130,7 @@ int Application::run(int argc, char* argv[]) {
     // Cleanup
     running_.store(false);
     listener_.stop();
+    nat_.cleanup();  // Remove UPnP port mapping
     if (listener_thread_.joinable()) {
         listener_thread_.join();
     }
@@ -107,6 +155,28 @@ void Application::show_main_menu() {
 
     ui::draw_status_bar("ONLINE", static_cast<int>(peer_book_.size()),
                         req_count, settings_.listen_port);
+
+    // Show public address if available
+    const auto& ns = nat_.status();
+    if (!ns.public_ip.empty()) {
+        std::cout << "\n";
+        if (ns.port_forwarded) {
+            std::cout << "  " << ui::ansi::BRIGHT_GREEN << "\xe2\x97\x8f" << ui::ansi::RESET
+                      << ui::ansi::GRAY << " Your address: " << ui::ansi::RESET
+                      << ui::ansi::BOLD << ui::ansi::WHITE
+                      << ns.public_ip << ":" << settings_.listen_port
+                      << ui::ansi::RESET
+                      << ui::ansi::GRAY << "  (internet)" << ui::ansi::RESET << "\n";
+        } else {
+            std::cout << "  " << ui::ansi::YELLOW << "\xe2\x97\x8f" << ui::ansi::RESET
+                      << ui::ansi::GRAY << " Public IP: " << ui::ansi::RESET
+                      << ui::ansi::WHITE << ns.public_ip << ui::ansi::RESET
+                      << ui::ansi::GRAY << "  (port forwarding needed)" << ui::ansi::RESET << "\n";
+        }
+        std::cout << "  " << ui::ansi::DIM << ui::ansi::GRAY
+                  << "Local: " << ns.local_ip << ":" << settings_.listen_port
+                  << ui::ansi::RESET << "\n";
+    }
 
     std::cout << "\n";
     ui::print_option("1", "CHAT");
@@ -513,10 +583,23 @@ void Application::connect_to_peer(const Peer& peer) {
     if (!conn.connect(peer.address, peer.port)) {
         std::cout << "\n";
         ui::print_error("Connection failed: " + conn.last_error());
-        ui::print_prompt("Press Enter...");
+        std::cout << "\n";
+        std::cout << ui::ansi::DIM << ui::ansi::YELLOW
+                  << "  Troubleshooting:\n"
+                  << "    1. Is " << peer.nickname << " running CRUX on " << peer.address << "?\n"
+                  << "    2. Are both devices on the SAME WiFi / network?\n"
+                  << "    3. Is the IP address still correct? (IPs change when you switch networks)\n"
+                  << "       Go to PEOPLE > Edit to update it.\n"
+                  << "    4. Is port " << peer.port << " allowed through the firewall?\n"
+                  << "       Windows: Allow crux.exe in Windows Firewall\n"
+                  << "       Linux:   sudo ufw allow " << peer.port << "/tcp\n"
+                  << "    5. Try pinging the address:  ping " << peer.address << "\n"
+                  << ui::ansi::RESET;
+        ui::print_prompt("\n  Press Enter...");
         ui::read_line();
         return;
     }
+
 
     std::cout << "\n";
     ui::print_success("TCP connected. Performing handshake...");

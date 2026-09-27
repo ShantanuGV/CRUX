@@ -5,6 +5,7 @@
 #include "crux/core/state.hpp"
 #include "crux/network/connection.hpp"
 #include "crux/protocol/frame.hpp"
+#include "crux/nat/nat.hpp"
 
 #include <atomic>
 #include <mutex>
@@ -58,9 +59,10 @@ private:
     void handle_incoming_connection(Connection conn);
 
     // ─── State ──────────────────────────────────────────
-    Settings   settings_;
-    PeerBook   peer_book_;
-    Listener   listener_;
+    Settings       settings_;
+    PeerBook       peer_book_;
+    Listener       listener_;
+    nat::NATTraversal nat_;
 
     // Incoming requests queue
     std::mutex                     requests_mutex_;
