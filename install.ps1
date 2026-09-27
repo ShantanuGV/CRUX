@@ -14,7 +14,7 @@
     .\install.ps1
 #>
 
-$ErrorActionPreference = "Stop"
+
 
 # ─── Configuration ──────────────────────────────────────────
 
@@ -132,15 +132,17 @@ $TEMP_DIR = Join-Path $env:TEMP "crux-install-$(Get-Random)"
 Write-Host ""
 Write-Host "  Downloading CRUX..." -ForegroundColor Yellow
 
-try {
-    & git clone --depth 1 $REPO_URL $TEMP_DIR 2>&1 | Out-Null
-    if ($LASTEXITCODE -ne 0) { throw "Git clone failed" }
-    Write-Host "    [OK] Source downloaded" -ForegroundColor Green
-} catch {
+$cloneOutput = & git clone --depth 1 -q $REPO_URL $TEMP_DIR 2>&1
+if ($LASTEXITCODE -ne 0 -or -not (Test-Path $TEMP_DIR)) {
     Write-Host "  [ERROR] Failed to download CRUX." -ForegroundColor Red
+    if ($cloneOutput) {
+        $msg = ($cloneOutput | Out-String).Trim()
+        if ($msg) { Write-Host "  $msg" -ForegroundColor Gray }
+    }
     Write-Host "  Check your internet connection and try again." -ForegroundColor Gray
     exit 1
 }
+Write-Host "    [OK] Source downloaded" -ForegroundColor Green
 
 # ─── Build ─────────────────────────────────────────────────
 
@@ -149,44 +151,75 @@ Write-Host "  Building CRUX..." -ForegroundColor Yellow
 
 $BUILD_DIR = Join-Path $TEMP_DIR "build"
 
-try {
-    if ($compiler.Type -eq "MinGW") {
-        $make = Find-Make
-        if (-not $make) {
-            Write-Host "  [ERROR] mingw32-make not found." -ForegroundColor Red
-            exit 1
-        }
-
-        # Configure
-        & $cmake -S $TEMP_DIR -B $BUILD_DIR -G "MinGW Makefiles" `
-            -DCMAKE_BUILD_TYPE=Release `
-            -DCRUX_STATIC=ON `
-            -DCMAKE_MAKE_PROGRAM="$make" 2>&1 | Out-Null
-        if ($LASTEXITCODE -ne 0) { throw "CMake configure failed" }
-
-        # Build
-        & $cmake --build $BUILD_DIR 2>&1 | Out-Null
-        if ($LASTEXITCODE -ne 0) { throw "Build failed" }
-    } else {
-        # MSVC
-        & $cmake -S $TEMP_DIR -B $BUILD_DIR 2>&1 | Out-Null
-        if ($LASTEXITCODE -ne 0) { throw "CMake configure failed" }
-
-        & $cmake --build $BUILD_DIR --config Release 2>&1 | Out-Null
-        if ($LASTEXITCODE -ne 0) { throw "Build failed" }
+if ($compiler.Type -eq "MinGW") {
+    $make = Find-Make
+    if (-not $make) {
+        Write-Host "  [ERROR] mingw32-make not found." -ForegroundColor Red
+        if (Test-Path $TEMP_DIR) { Remove-Item -Recurse -Force $TEMP_DIR }
+        exit 1
     }
-    Write-Host "    [OK] Build successful" -ForegroundColor Green
-} catch {
-    Write-Host "  [ERROR] Build failed: $_" -ForegroundColor Red
-    Write-Host "  Make sure your C++ toolchain supports C++20." -ForegroundColor Gray
-    if (Test-Path $TEMP_DIR) { Remove-Item -Recurse -Force $TEMP_DIR }
-    exit 1
+
+    # Configure
+    $cfgOutput = & $cmake -S $TEMP_DIR -B $BUILD_DIR -G "MinGW Makefiles" `
+        -DCMAKE_BUILD_TYPE=Release `
+        -DCRUX_STATIC=ON `
+        -DCMAKE_MAKE_PROGRAM="$make" 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "  [ERROR] CMake configure failed." -ForegroundColor Red
+        if ($cfgOutput) {
+            $msg = ($cfgOutput | Out-String).Trim()
+            if ($msg) { Write-Host "  $msg" -ForegroundColor Gray }
+        }
+        if (Test-Path $TEMP_DIR) { Remove-Item -Recurse -Force $TEMP_DIR }
+        exit 1
+    }
+
+    # Build
+    $bldOutput = & $cmake --build $BUILD_DIR 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "  [ERROR] Build failed." -ForegroundColor Red
+        if ($bldOutput) {
+            $msg = ($bldOutput | Out-String).Trim()
+            if ($msg) { Write-Host "  $msg" -ForegroundColor Gray }
+        }
+        Write-Host "  Make sure your C++ toolchain supports C++20." -ForegroundColor Gray
+        if (Test-Path $TEMP_DIR) { Remove-Item -Recurse -Force $TEMP_DIR }
+        exit 1
+    }
+} else {
+    # MSVC
+    $cfgOutput = & $cmake -S $TEMP_DIR -B $BUILD_DIR 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "  [ERROR] CMake configure failed." -ForegroundColor Red
+        if ($cfgOutput) {
+            $msg = ($cfgOutput | Out-String).Trim()
+            if ($msg) { Write-Host "  $msg" -ForegroundColor Gray }
+        }
+        if (Test-Path $TEMP_DIR) { Remove-Item -Recurse -Force $TEMP_DIR }
+        exit 1
+    }
+
+    $bldOutput = & $cmake --build $BUILD_DIR --config Release 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "  [ERROR] Build failed." -ForegroundColor Red
+        if ($bldOutput) {
+            $msg = ($bldOutput | Out-String).Trim()
+            if ($msg) { Write-Host "  $msg" -ForegroundColor Gray }
+        }
+        if (Test-Path $TEMP_DIR) { Remove-Item -Recurse -Force $TEMP_DIR }
+        exit 1
+    }
 }
+Write-Host "    [OK] Build successful" -ForegroundColor Green
 
 # ─── Install Binary ───────────────────────────────────────
 
 Write-Host ""
 Write-Host "  Installing CRUX..." -ForegroundColor Yellow
+
+# Stop any running crux instances before copying
+Get-Process -Name crux -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+Start-Sleep -Milliseconds 300
 
 # Create install directory
 New-Item -ItemType Directory -Force -Path $BIN_DIR | Out-Null
@@ -203,24 +236,34 @@ if (-not (Test-Path $exe)) {
 }
 
 # Copy binary
-Copy-Item -Path $exe -Destination "$BIN_DIR\crux.exe" -Force
-Write-Host "    [OK] Installed to: $BIN_DIR\crux.exe" -ForegroundColor Green
+try {
+    Copy-Item -Path $exe -Destination "$BIN_DIR\crux.exe" -Force -ErrorAction Stop
+    Write-Host "    [OK] Installed to: $BIN_DIR\crux.exe" -ForegroundColor Green
+} catch {
+    Write-Host "  [ERROR] Failed to copy binary: $_" -ForegroundColor Red
+    if (Test-Path $TEMP_DIR) { Remove-Item -Recurse -Force $TEMP_DIR }
+    exit 1
+}
 
 # ─── Add to PATH ──────────────────────────────────────────
 
 $currentPath = [Environment]::GetEnvironmentVariable("Path", "User")
 if ($currentPath -notlike "*$BIN_DIR*") {
     [Environment]::SetEnvironmentVariable("Path", "$currentPath;$BIN_DIR", "User")
-    $env:Path = "$env:Path;$BIN_DIR"
     Write-Host "    [OK] Added to PATH" -ForegroundColor Green
 } else {
     Write-Host "    [OK] Already in PATH" -ForegroundColor Green
 }
 
+# Also ensure it is in the current session's PATH
+if ($env:Path -notlike "*$BIN_DIR*") {
+    $env:Path = "$env:Path;$BIN_DIR"
+}
+
 # ─── Cleanup ──────────────────────────────────────────────
 
 if (Test-Path $TEMP_DIR) {
-    Remove-Item -Recurse -Force $TEMP_DIR
+    Remove-Item -Recurse -Force $TEMP_DIR -ErrorAction SilentlyContinue
 }
 
 # ─── Done ─────────────────────────────────────────────────
