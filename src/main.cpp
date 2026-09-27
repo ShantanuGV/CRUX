@@ -1,8 +1,6 @@
-#include <iostream>
+#include "crux/core/application.hpp"
 
-int main() {
-    std::cout << "CRUX v0.1\n";
-    std::cout << "Direct peer-to-peer TCP messenger\n";
-
-    return 0;
+int main(int argc, char* argv[]) {
+    crux::Application app;
+    return app.run(argc, argv);
 }
