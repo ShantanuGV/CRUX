@@ -9,7 +9,7 @@ Just two endpoints, a protocol, and a direct connection.
          CRUX A                     CRUX B
       ┌───────────┐             ┌───────────┐
       │ listener  │   direct    │ listener  │
-      │ connector │◄───TCP────►│ connector │
+      │ connector │◄────TCP────►│ connector │
       └───────────┘             └───────────┘
 ```
 
