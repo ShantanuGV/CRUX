@@ -89,4 +89,10 @@ std::string read_line();
 // Read integer from stdin (returns -1 on invalid)
 int read_int();
 
+// Print a cryptographic fingerprint in readable 8-character blocks
+void print_fingerprint(const std::string& label, const std::string& fingerprint);
+
+// Print peer sync status indicator
+void print_sync_status(const std::string& peer_name, bool synced);
+
 } // namespace crux::ui

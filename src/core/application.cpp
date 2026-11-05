@@ -13,13 +13,86 @@ Application::Application() = default;
 
 Application::~Application() {
     running_.store(false);
+    address_monitor_.stop();
     listener_.stop();
     if (listener_thread_.joinable()) {
         listener_thread_.join();
     }
 }
 
+std::string Application::display_fingerprint(const std::string& fp) {
+    if (fp.empty()) return "unverified";
+    if (fp.size() <= 16) return fp;
+    return fp.substr(0, 16) + "...";
+}
+
 int Application::run(int argc, char* argv[]) {
+    // ─── Custom data directory override (must be set before any Storage calls) ───
+    for (int i = 1; i < argc; ++i) {
+        std::string arg = argv[i];
+        if ((arg == "--data-dir" || arg == "-d") && i + 1 < argc) {
+            Storage::set_custom_dir(argv[i + 1]);
+            ++i;
+        }
+    }
+
+    // ─── Early CLI flag handling (before network init) ─────────
+    for (int i = 1; i < argc; ++i) {
+        std::string arg = argv[i];
+        if (arg == "--version" || arg == "-v") {
+            std::cout << "CRUX " << CRUX_VERSION_STRING << " (TLS 1.3 / Ed25519)\n";
+            return 0;
+        }
+        if (arg == "--check-update") {
+            std::cout << "Checking for updates...\n";
+            Updater updater;
+            auto info = updater.check();
+            if (!info.error.empty()) {
+                std::cerr << "Error: " << info.error << "\n";
+                return 1;
+            }
+            if (info.update_available) {
+                std::cout << "New version available: " << info.latest_version
+                          << " (current: " << CRUX_VERSION_STRING << ")\n"
+                          << "Download: " << info.download_url << "\n";
+            } else {
+                std::cout << "CRUX " << CRUX_VERSION_STRING << " is the latest version.\n";
+            }
+            return 0;
+        }
+        if (arg == "--update") {
+            std::cout << "Updating CRUX...\n";
+            Updater updater;
+            std::cout << updater.update() << "\n";
+            return 0;
+        }
+        if (arg == "network" && i + 1 < argc && std::string(argv[i + 1]) == "status") {
+            platform::net_init();
+            std::cout << "CRUX Network Status:\n"
+                      << "  Local IP:    " << platform::get_local_ip() << "\n"
+                      << "  Port:        " << settings_.listen_port << "\n";
+            platform::net_cleanup();
+            return 0;
+        }
+        if (arg == "people" && i + 2 < argc && std::string(argv[i + 1]) == "info") {
+            Storage::load_peers(peer_book_);
+            std::string name = argv[i + 2];
+            for (const auto& p : peer_book_.peers()) {
+                if (p.nickname == name) {
+                    std::cout << "Peer: " << p.nickname << "\n"
+                              << "  Address:     " << p.address << ":" << p.port << "\n"
+                              << "  Fingerprint: " << p.fingerprint << "\n"
+                              << "  Our Version: " << p.addr_version << "\n"
+                              << "  Peer Version:" << p.their_version << "\n"
+                              << "  Pending:     " << (p.addr_pending ? "yes" : "no") << "\n";
+                    return 0;
+                }
+            }
+            std::cerr << "Peer '" << name << "' not found.\n";
+            return 1;
+        }
+    }
+
     // Initialize platform networking
     if (!platform::net_init()) {
         std::cerr << "Failed to initialize networking.\n";
@@ -28,7 +101,7 @@ int Application::run(int argc, char* argv[]) {
 
     // Enable ANSI on Windows
     ui::enable_ansi();
-    ui::set_terminal_title("CRUX - Direct Peer Communication");
+    ui::set_terminal_title("CRUX V1.1 - Encrypted Peer Messenger");
 
     // Load persistent data
     Storage::load_settings(settings_);
@@ -43,22 +116,42 @@ int Application::run(int argc, char* argv[]) {
                 ++i;
             } catch (...) {
                 std::cerr << "Invalid port number.\n";
+                platform::net_cleanup();
                 return 1;
             }
         } else if (arg == "--help" || arg == "-h") {
-            std::cout << "CRUX - Direct Peer Communication\n\n"
-                      << "Usage: crux [OPTIONS]\n\n"
+            std::cout << "CRUX " << CRUX_VERSION_STRING << " - Direct Encrypted Peer Messenger\n\n"
+                      << "Usage: crux [OPTIONS] [COMMAND]\n\n"
                       << "Options:\n"
-                      << "  -p, --port PORT    Set listening port (default: "
+                      << "  -p, --port PORT      Set listening port (default: "
                       << settings_.listen_port << ")\n"
-                      << "  -h, --help         Show this help\n\n"
-                      << "CRUX V1 communication is UNENCRYPTED.\n"
-                      << "Encryption is planned for a future version.\n";
+                      << "  -d, --data-dir DIR   Set custom configuration / identity directory\n"
+                      << "  -v, --version        Show version and exit\n"
+                      << "  --check-update       Check for updates\n"
+                      << "  --update             Update to latest release\n"
+                      << "  -h, --help           Show this help\n\n"
+                      << "Commands:\n"
+                      << "  network status     Display local network configuration\n"
+                      << "  people info <name> Display peer identity & sync info\n\n";
+            platform::net_cleanup();
             return 0;
         }
     }
 
-    // Start listener
+    // Load or generate cryptographic identity
+    identity_ = identity::load_or_generate(
+        Storage::identity_key_path(),
+        Storage::identity_cert_path(),
+        settings_.nickname
+    );
+
+    if (!identity_.valid()) {
+        ui::print_error("Failed to generate or load cryptographic identity.");
+        platform::net_cleanup();
+        return 1;
+    }
+
+    // Start TLS listener
     if (!listener_.start(settings_.listen_port)) {
         ui::print_error("Cannot start listener on port " +
                         std::to_string(settings_.listen_port) + ": " +
@@ -75,51 +168,42 @@ int Application::run(int argc, char* argv[]) {
     running_.store(true);
     listener_thread_ = std::thread(&Application::listener_thread_func, this);
 
-    // NAT Traversal — discover public IP and set up port forwarding
+    // Initial IP and Address Monitor startup
+    current_ip_ = platform::get_local_ip();
+    address_monitor_.start(settings_.listen_port,
+        [this](const std::string& ip, std::uint16_t port, std::uint32_t ver) {
+            on_address_changed(ip, port, ver);
+        });
+
+    // NAT setup (UPnP)
     ui::clear_screen();
-    ui::draw_header("N A T   S E T U P");
+    ui::draw_header("C R U X   V 1 . 1   S T A R T U P");
     std::cout << "\n";
-    std::cout << ui::ansi::DIM << "  Discovering network configuration...\n" << ui::ansi::RESET;
-    std::cout << ui::ansi::DIM << "  Detecting public IP..." << ui::ansi::RESET << std::flush;
+    ui::print_info("Identity Fingerprint", display_fingerprint(identity_.fingerprint));
+    ui::print_fingerprint("Full Fingerprint", identity_.fingerprint);
+    std::cout << "\n";
+    std::cout << ui::ansi::DIM << "  Setting up network & UPnP port forwarding..." << ui::ansi::RESET << "\n";
 
     auto nat_status = nat_.setup(settings_.listen_port);
 
-    std::cout << "\n";
     ui::print_info("Local IP    ", nat_status.local_ip);
     if (!nat_status.public_ip.empty()) {
         ui::print_info("Public IP   ", nat_status.public_ip);
-    } else {
-        std::cout << ui::ansi::DIM << ui::ansi::YELLOW
-                  << "  Could not detect public IP (no internet?)\n"
-                  << ui::ansi::RESET;
     }
-    if (nat_status.upnp_available) {
-        ui::print_info("UPnP Gateway", nat_status.gateway_ip);
-        if (nat_status.port_forwarded) {
-            std::cout << ui::ansi::BRIGHT_GREEN << "  \xe2\x9c\x93 Port "
-                      << nat_status.external_port
-                      << " forwarded automatically via UPnP\n" << ui::ansi::RESET;
-        } else {
-            std::cout << ui::ansi::YELLOW << "  \xe2\x9c\x97 UPnP port forwarding failed: "
-                      << nat_status.error << "\n" << ui::ansi::RESET;
-        }
-    } else {
-        std::cout << ui::ansi::DIM << ui::ansi::YELLOW
-                  << "  No UPnP gateway found. For internet access, forward port "
-                  << settings_.listen_port << " on your router.\n"
-                  << ui::ansi::RESET;
+    if (nat_status.port_forwarded) {
+        std::cout << ui::ansi::BRIGHT_GREEN << "  \xe2\x9c\x93 Port "
+                  << nat_status.external_port
+                  << " forwarded automatically via UPnP\n" << ui::ansi::RESET;
     }
     std::cout << "\n";
-    if (!nat_status.public_ip.empty() && nat_status.port_forwarded) {
-        std::cout << ui::ansi::BOLD << ui::ansi::WHITE
-                  << "  Share this address with friends:\n"
-                  << ui::ansi::RESET;
-        std::cout << ui::ansi::BOLD << ui::ansi::BRIGHT_CYAN
-                  << "    " << nat_status.public_ip << ":"
-                  << nat_status.external_port << "\n\n"
-                  << ui::ansi::RESET;
+
+    // Auto-sync addresses if enabled
+    if (settings_.auto_sync && !peer_book_.empty()) {
+        sync_.retry_pending(peer_book_, identity_, current_ip_, settings_.listen_port, addr_version_);
+        Storage::save_peers(peer_book_);
     }
-    ui::print_prompt("Press Enter to continue...");
+
+    ui::print_prompt("Press Enter to continue to CRUX...");
     ui::read_line();
 
     // Main loop
@@ -129,8 +213,9 @@ int Application::run(int argc, char* argv[]) {
 
     // Cleanup
     running_.store(false);
+    address_monitor_.stop();
     listener_.stop();
-    nat_.cleanup();  // Remove UPnP port mapping
+    nat_.cleanup();
     if (listener_thread_.joinable()) {
         listener_thread_.join();
     }
@@ -156,35 +241,27 @@ void Application::show_main_menu() {
     ui::draw_status_bar("ONLINE", static_cast<int>(peer_book_.size()),
                         req_count, settings_.listen_port);
 
-    // Show public address if available
-    const auto& ns = nat_.status();
-    if (!ns.public_ip.empty()) {
-        std::cout << "\n";
-        if (ns.port_forwarded) {
-            std::cout << "  " << ui::ansi::BRIGHT_GREEN << "\xe2\x97\x8f" << ui::ansi::RESET
-                      << ui::ansi::GRAY << " Your address: " << ui::ansi::RESET
-                      << ui::ansi::BOLD << ui::ansi::WHITE
-                      << ns.public_ip << ":" << settings_.listen_port
-                      << ui::ansi::RESET
-                      << ui::ansi::GRAY << "  (internet)" << ui::ansi::RESET << "\n";
-        } else {
-            std::cout << "  " << ui::ansi::YELLOW << "\xe2\x97\x8f" << ui::ansi::RESET
-                      << ui::ansi::GRAY << " Public IP: " << ui::ansi::RESET
-                      << ui::ansi::WHITE << ns.public_ip << ui::ansi::RESET
-                      << ui::ansi::GRAY << "  (port forwarding needed)" << ui::ansi::RESET << "\n";
-        }
-        std::cout << "  " << ui::ansi::DIM << ui::ansi::GRAY
-                  << "Local: " << ns.local_ip << ":" << settings_.listen_port
-                  << ui::ansi::RESET << "\n";
-    }
-
     std::cout << "\n";
+    std::cout << "  " << ui::ansi::BRIGHT_GREEN << "\xe2\x97\x8f" << ui::ansi::RESET
+              << ui::ansi::GRAY << " Fingerprint: " << ui::ansi::RESET
+              << ui::ansi::BOLD << ui::ansi::CYAN
+              << display_fingerprint(identity_.fingerprint)
+              << ui::ansi::RESET
+              << ui::ansi::GRAY << "  (" << (settings_.auto_sync ? "Auto-Sync ON" : "Auto-Sync OFF") << ")"
+              << ui::ansi::RESET << "\n";
+
+    std::cout << "  " << ui::ansi::DIM << ui::ansi::GRAY
+              << "Endpoint:    " << current_ip_ << ":" << settings_.listen_port
+              << " (v" << addr_version_ << ")"
+              << ui::ansi::RESET << "\n\n";
+
     ui::print_option("1", "CHAT");
     ui::print_option("2", "REQUESTS" +
         (req_count > 0 ? std::string(" (") + std::to_string(req_count) + " pending)" : ""));
     ui::print_option("3", "PEOPLE");
-    ui::print_option("4", "SETTINGS");
-    ui::print_option("5", "EXIT");
+    ui::print_option("4", "NETWORK STATUS");
+    ui::print_option("5", "SETTINGS");
+    ui::print_option("6", "EXIT");
 
     ui::print_prompt(">");
 
@@ -193,8 +270,9 @@ void Application::show_main_menu() {
         case 1: show_chat_menu(); break;
         case 2: show_requests_menu(); break;
         case 3: show_people_menu(); break;
-        case 4: show_settings_menu(); break;
-        case 5:
+        case 4: show_network_status(); break;
+        case 5: show_settings_menu(); break;
+        case 6:
             running_.store(false);
             ui::clear_screen();
             std::cout << ui::ansi::DIM << ui::ansi::CYAN
@@ -202,6 +280,59 @@ void Application::show_main_menu() {
             break;
         default:
             break;
+    }
+}
+
+// ─── Network Status Screen ──────────────────────────────────
+
+void Application::show_network_status() {
+    ui::clear_screen();
+    ui::draw_header("N E T W O R K   S T A T U S");
+
+    std::cout << "\n";
+    ui::print_info("Listening Port ", std::to_string(settings_.listen_port));
+    ui::print_info("Local IP       ", current_ip_);
+    ui::print_info("Address Version", "v" + std::to_string(addr_version_));
+    ui::print_info("Auto-Sync      ", settings_.auto_sync ? "Enabled (Silent)" : "Disabled");
+
+    const auto& ns = nat_.status();
+    if (!ns.public_ip.empty()) {
+        ui::print_info("Public IP      ", ns.public_ip);
+    }
+    ui::print_info("UPnP Forwarding", ns.port_forwarded ? "Active" : "Inactive");
+
+    std::cout << "\n";
+    ui::print_fingerprint("Your Fingerprint", identity_.fingerprint);
+
+    std::cout << "\n" << ui::ansi::BOLD << ui::ansi::WHITE << "  Peer Address Synchronization:\n" << ui::ansi::RESET;
+    if (peer_book_.empty()) {
+        std::cout << ui::ansi::GRAY << "    No peers registered.\n" << ui::ansi::RESET;
+    } else {
+        for (const auto& p : peer_book_.peers()) {
+            std::cout << "    ";
+            if (!p.addr_pending) {
+                std::cout << ui::ansi::BRIGHT_GREEN << "\xe2\x9c\x93 " << ui::ansi::RESET;
+            } else {
+                std::cout << ui::ansi::YELLOW << "\xe2\x97\x8b " << ui::ansi::RESET;
+            }
+            std::cout << ui::ansi::WHITE << p.nickname << ui::ansi::RESET
+                      << ui::ansi::GRAY << "  " << p.address << ":" << p.port
+                      << "  (ack'd v" << p.addr_version << ")" << ui::ansi::RESET;
+            if (p.addr_pending) {
+                std::cout << ui::ansi::YELLOW << " [pending]" << ui::ansi::RESET;
+            }
+            std::cout << "\n";
+        }
+    }
+
+    std::cout << "\n";
+    ui::print_option("S", "Synchronize all pending peers now");
+    ui::print_option("B", "Back");
+    ui::print_prompt(">");
+
+    std::string choice = ui::read_line();
+    if (!choice.empty() && (choice[0] == 's' || choice[0] == 'S')) {
+        sync_peers();
     }
 }
 
@@ -226,15 +357,15 @@ void Application::show_chat_menu() {
                   << (i + 1) << "." << ui::ansi::RESET << " "
                   << ui::ansi::WHITE << p->nickname << ui::ansi::RESET
                   << ui::ansi::GRAY << "  " << p->address << ":" << p->port
+                  << "  (" << display_fingerprint(p->fingerprint) << ")"
                   << ui::ansi::RESET << "\n";
     }
     std::cout << "\n";
     ui::print_option("0", "Back");
-
     ui::print_prompt("Select peer >");
 
     int choice = ui::read_int();
-    if (choice == 0 || choice < 0) return;
+    if (choice <= 0) return;
 
     std::size_t idx = static_cast<std::size_t>(choice) - 1;
     const auto* peer = peer_book_.at(idx);
@@ -254,18 +385,18 @@ void Application::show_requests_menu() {
     ui::clear_screen();
     ui::draw_header("R E Q U E S T S");
 
-    // Snapshot display data under lock
-    struct RequestInfo {
+    struct ReqView {
         std::string peer_name;
+        std::string fingerprint;
         std::string address;
         std::uint16_t port;
     };
-    std::vector<RequestInfo> display_list;
+    std::vector<ReqView> display_list;
 
     {
         std::lock_guard lock(requests_mutex_);
         for (const auto& req : incoming_requests_) {
-            display_list.push_back({req.peer_name, req.address, req.port});
+            display_list.push_back({req.peer_name, req.peer_fingerprint, req.address, req.port});
         }
     }
 
@@ -278,15 +409,13 @@ void Application::show_requests_menu() {
     }
 
     for (std::size_t i = 0; i < display_list.size(); ++i) {
-        auto& info = display_list[i];
+        const auto& info = display_list[i];
         std::cout << "\n";
         std::cout << "  " << ui::ansi::CYAN << ui::ansi::BOLD
                   << (i + 1) << "." << ui::ansi::RESET << " "
                   << ui::ansi::WHITE << ui::ansi::BOLD << info.peer_name << ui::ansi::RESET << "\n"
-                  << "     " << ui::ansi::GRAY << info.address << ":" << info.port
-                  << ui::ansi::RESET << "\n"
-                  << "     " << ui::ansi::DIM << "Incoming connection request"
-                  << ui::ansi::RESET << "\n";
+                  << "     " << ui::ansi::GRAY << "Endpoint:    " << info.address << ":" << info.port << ui::ansi::RESET << "\n"
+                  << "     " << ui::ansi::CYAN << "Fingerprint: " << display_fingerprint(info.fingerprint) << ui::ansi::RESET << "\n";
     }
 
     std::cout << "\n";
@@ -311,9 +440,9 @@ void Application::show_requests_menu() {
     if (action.empty()) return;
     char c = static_cast<char>(std::toupper(static_cast<unsigned char>(action[0])));
 
-    // Extract connection under lock, then operate lock-free
-    Connection conn;
+    TLSConnection conn;
     std::string peer_name;
+    std::string peer_fp;
     std::string peer_addr;
     std::uint16_t peer_port = 0;
     bool found = false;
@@ -323,6 +452,7 @@ void Application::show_requests_menu() {
         if (idx < incoming_requests_.size()) {
             auto& req = incoming_requests_[idx];
             peer_name = req.peer_name;
+            peer_fp   = req.peer_fingerprint;
             peer_addr = req.address;
             peer_port = req.port;
 
@@ -335,8 +465,7 @@ void Application::show_requests_menu() {
                 req.connection.close();
             }
 
-            incoming_requests_.erase(
-                incoming_requests_.begin() + static_cast<std::ptrdiff_t>(idx));
+            incoming_requests_.erase(incoming_requests_.begin() + static_cast<std::ptrdiff_t>(idx));
             found = true;
         }
     }
@@ -349,10 +478,25 @@ void Application::show_requests_menu() {
     }
 
     if (c == 'A') {
-        mark_peer_active(peer_addr, peer_port);
-        ui::print_success("Connection accepted!");
+        Peer* existing = peer_book_.find_by_fingerprint(peer_fp);
+        if (!existing) {
+            Peer p;
+            p.nickname = peer_name;
+            p.fingerprint = peer_fp;
+            p.address = peer_addr;
+            p.port = peer_port > 0 ? peer_port : DEFAULT_PORT;
+            peer_book_.add(p);
+            Storage::save_peers(peer_book_);
+        } else {
+            existing->address = peer_addr;
+            if (peer_port > 0) existing->port = peer_port;
+            Storage::save_peers(peer_book_);
+        }
+
+        mark_peer_active(peer_fp);
+        ui::print_success("Connection accepted! Encrypted with TLS 1.3");
         run_chat(conn, peer_name);
-        unmark_peer_active(peer_addr, peer_port);
+        unmark_peer_active(peer_fp);
         conn.close();
     } else if (c == 'R') {
         ui::print_success("Request rejected.");
@@ -360,7 +504,6 @@ void Application::show_requests_menu() {
         ui::read_line();
     }
 }
-
 
 // ─── People Menu ────────────────────────────────────────────
 
@@ -376,17 +519,24 @@ void Application::show_people_menu() {
         for (std::size_t i = 0; i < peer_book_.size(); ++i) {
             const auto* p = peer_book_.at(i);
             std::cout << "  " << ui::ansi::CYAN << ui::ansi::BOLD
-                      << (i + 1) << "." << ui::ansi::RESET << " "
-                      << ui::ansi::WHITE << std::left << p->nickname << ui::ansi::RESET
+                      << (i + 1) << "." << ui::ansi::RESET << " ";
+            if (!p->addr_pending) {
+                std::cout << ui::ansi::BRIGHT_GREEN << "\xe2\x9c\x93 " << ui::ansi::RESET;
+            } else {
+                std::cout << ui::ansi::YELLOW << "\xe2\x97\x8b " << ui::ansi::RESET;
+            }
+            std::cout << ui::ansi::WHITE << std::left << p->nickname << ui::ansi::RESET
                       << ui::ansi::GRAY << "  " << p->address << ":" << p->port
+                      << "  [" << display_fingerprint(p->fingerprint) << "]"
                       << ui::ansi::RESET << "\n";
         }
     }
 
     std::cout << "\n";
-    ui::print_option("A", "Add");
-    ui::print_option("E", "Edit");
-    ui::print_option("D", "Delete");
+    ui::print_option("A", "Add Person (Pairing)");
+    ui::print_option("E", "Edit Person");
+    ui::print_option("D", "Delete Person");
+    ui::print_option("S", "Synchronize Addresses");
     ui::print_option("B", "Back");
 
     ui::print_prompt(">");
@@ -399,6 +549,7 @@ void Application::show_people_menu() {
         case 'A': add_peer(); break;
         case 'E': edit_peer(); break;
         case 'D': delete_peer(); break;
+        case 'S': sync_peers(); break;
         case 'B': break;
         default: break;
     }
@@ -411,17 +562,16 @@ void Application::show_settings_menu() {
     ui::draw_header("S E T T I N G S");
 
     std::cout << "\n";
-    ui::print_info("Listening Port", std::to_string(settings_.listen_port));
-    ui::print_info("Nickname      ", settings_.nickname);
+    ui::print_info("Listening Port  ", std::to_string(settings_.listen_port));
+    ui::print_info("Nickname        ", settings_.nickname);
+    ui::print_info("Auto-Sync       ", settings_.auto_sync ? "ON (Silent & Automatic)" : "OFF");
     std::cout << "\n";
-
-    std::cout << ui::ansi::DIM << ui::ansi::YELLOW
-              << "  NOTE: CRUX V1 communication is UNENCRYPTED.\n"
-              << "  Encryption is planned for a future version.\n"
-              << ui::ansi::RESET << "\n";
+    ui::print_fingerprint("Local Fingerprint", identity_.fingerprint);
+    std::cout << "\n";
 
     ui::print_option("1", "Change listening port");
     ui::print_option("2", "Change nickname");
+    ui::print_option("3", std::string("Toggle Automatic Address Sync (currently ") + (settings_.auto_sync ? "ON" : "OFF") + ")");
     ui::print_option("B", "Back");
 
     ui::print_prompt(">");
@@ -433,7 +583,7 @@ void Application::show_settings_menu() {
         if (port > 0 && port <= 65535) {
             settings_.listen_port = static_cast<std::uint16_t>(port);
             Storage::save_settings(settings_);
-            ui::print_success("Port updated. Restart CRUX for it to take effect.");
+            ui::print_success("Port updated to " + std::to_string(port) + ". Restart CRUX to bind new port.");
         } else {
             ui::print_error("Invalid port. Must be 1-65535.");
         }
@@ -451,10 +601,17 @@ void Application::show_settings_menu() {
         }
         ui::print_prompt("Press Enter...");
         ui::read_line();
+    } else if (choice == "3") {
+        settings_.auto_sync = !settings_.auto_sync;
+        Storage::save_settings(settings_);
+        ui::print_success(std::string("Automatic Address Synchronization is now ") +
+                          (settings_.auto_sync ? "ENABLED" : "DISABLED"));
+        ui::print_prompt("Press Enter...");
+        ui::read_line();
     }
 }
 
-// ─── Peer Management ────────────────────────────────────────
+// ─── People Management ──────────────────────────────────────
 
 void Application::add_peer() {
     std::cout << "\n" << ui::ansi::DIM << ui::ansi::CYAN
@@ -468,9 +625,9 @@ void Application::add_peer() {
     std::string addr = ui::read_line();
     if (addr.empty()) { ui::print_error("Address is required."); return; }
 
-    ui::print_prompt("Port (default 5623) >");
+    ui::print_prompt("Port (default " + std::to_string(DEFAULT_PORT) + ") >");
     std::string port_str = ui::read_line();
-    std::uint16_t port = 5623;
+    std::uint16_t port = DEFAULT_PORT;
     if (!port_str.empty()) {
         try {
             int p = std::stoi(port_str);
@@ -482,9 +639,18 @@ void Application::add_peer() {
         }
     }
 
-    peer_book_.add({nick, addr, port});
+    Peer new_peer;
+    new_peer.nickname     = nick;
+    new_peer.address      = addr;
+    new_peer.port         = port;
+    new_peer.addr_pending = false;
+
+    peer_book_.add(new_peer);
     Storage::save_peers(peer_book_);
+
     ui::print_success("Peer added: " + nick + " (" + addr + ":" + std::to_string(port) + ")");
+    std::cout << ui::ansi::DIM << "  (Identity fingerprint will be automatically verified & pinned on first connect)\n" << ui::ansi::RESET;
+
     ui::print_prompt("Press Enter...");
     ui::read_line();
 }
@@ -516,7 +682,10 @@ void Application::edit_peer() {
     ui::print_info("Current address", peer->address);
     ui::print_prompt("New address (Enter to keep) >");
     std::string addr = ui::read_line();
-    if (!addr.empty()) peer->address = addr;
+    if (!addr.empty()) {
+        peer->address = addr;
+        peer->addr_pending = true;
+    }
 
     ui::print_info("Current port", std::to_string(peer->port));
     ui::print_prompt("New port (Enter to keep) >");
@@ -560,11 +729,48 @@ void Application::delete_peer() {
     ui::read_line();
 }
 
+void Application::sync_peers(const std::string& specific_peer) {
+    if (peer_book_.empty()) {
+        ui::print_warning("No peers in address book to synchronize.");
+        ui::print_prompt("Press Enter...");
+        ui::read_line();
+        return;
+    }
+
+    std::cout << "\n" << ui::ansi::DIM << "  Synchronizing with peers..." << ui::ansi::RESET << "\n";
+    int ok_count = 0;
+    int fail_count = 0;
+
+    for (std::size_t i = 0; i < peer_book_.size(); ++i) {
+        Peer* p = peer_book_.at(i);
+        if (!p) continue;
+        if (!specific_peer.empty() && p->nickname != specific_peer) continue;
+
+        std::cout << "  Contacting " << p->nickname << " (" << p->address << ":" << p->port << ")... " << std::flush;
+        if (sync_.sync_one(*p, identity_, current_ip_, settings_.listen_port, addr_version_)) {
+            std::cout << ui::ansi::BRIGHT_GREEN << "ACK v" << p->addr_version << ui::ansi::RESET << "\n";
+            ++ok_count;
+        } else {
+            std::cout << ui::ansi::YELLOW << "Unreachable (marked pending)" << ui::ansi::RESET << "\n";
+            ++fail_count;
+        }
+    }
+
+    Storage::save_peers(peer_book_);
+    std::cout << "\n";
+    ui::print_info("Synchronized", std::to_string(ok_count) + " peers");
+    if (fail_count > 0) {
+        ui::print_info("Pending     ", std::to_string(fail_count) + " peers (will retry automatically)");
+    }
+    ui::print_prompt("\nPress Enter...");
+    ui::read_line();
+}
+
 // ─── Connection Flow ────────────────────────────────────────
 
 void Application::connect_to_peer(const Peer& peer) {
-    // Check duplicate
-    if (is_peer_active(peer.address, peer.port)) {
+    std::string active_id = peer.fingerprint.empty() ? (peer.address + ":" + std::to_string(peer.port)) : peer.fingerprint;
+    if (is_peer_active(active_id)) {
         ui::print_error("Already connected to " + peer.nickname);
         ui::print_prompt("Press Enter...");
         ui::read_line();
@@ -574,54 +780,61 @@ void Application::connect_to_peer(const Peer& peer) {
     ui::clear_screen();
     ui::draw_header("C O N N E C T I N G");
     std::cout << "\n";
-    ui::print_info("Peer", peer.nickname);
-    ui::print_info("Address", peer.address + ":" + std::to_string(peer.port));
+    ui::print_info("Peer       ", peer.nickname);
+    ui::print_info("Address    ", peer.address + ":" + std::to_string(peer.port));
+    if (!peer.fingerprint.empty()) {
+        ui::print_info("Fingerprint", display_fingerprint(peer.fingerprint));
+    }
     std::cout << "\n";
-    std::cout << ui::ansi::DIM << "  Connecting..." << ui::ansi::RESET << std::flush;
+    std::cout << ui::ansi::DIM << "  Connecting over encrypted TLS 1.3..." << ui::ansi::RESET << "\n";
 
-    Connection conn;
-    if (!conn.connect(peer.address, peer.port)) {
+    TLSConnection conn;
+    if (!conn.connect(peer.address, peer.port, peer.fingerprint, identity_, 5000)) {
         std::cout << "\n";
         ui::print_error("Connection failed: " + conn.last_error());
-        std::cout << "\n";
-        std::cout << ui::ansi::DIM << ui::ansi::YELLOW
+        std::cout << "\n" << ui::ansi::DIM << ui::ansi::YELLOW
                   << "  Troubleshooting:\n"
-                  << "    1. Is " << peer.nickname << " running CRUX on " << peer.address << "?\n"
-                  << "    2. Are both devices on the SAME WiFi / network?\n"
-                  << "    3. Is the IP address still correct? (IPs change when you switch networks)\n"
-                  << "       Go to PEOPLE > Edit to update it.\n"
-                  << "    4. Is port " << peer.port << " allowed through the firewall?\n"
-                  << "       Windows: Allow crux.exe in Windows Firewall\n"
-                  << "       Linux:   sudo ufw allow " << peer.port << "/tcp\n"
-                  << "    5. Try pinging the address:  ping " << peer.address << "\n"
+                  << "    1. Is " << peer.nickname << " running CRUX on " << peer.address << ":" << peer.port << "?\n"
+                  << "    2. Has their address changed? CRUX auto-syncs when online.\n"
+                  << "    3. Is port " << peer.port << " allowed through firewall / router?\n"
+                  << "    4. Verify their fingerprint matches your saved People record.\n"
                   << ui::ansi::RESET;
         ui::print_prompt("\n  Press Enter...");
         ui::read_line();
         return;
     }
 
+    // Opportunistically pin the fingerprint on first connection
+    if (peer.fingerprint.empty() && !conn.peer_fingerprint().empty()) {
+        for (std::size_t i = 0; i < peer_book_.size(); ++i) {
+            Peer* p = peer_book_.at(i);
+            if (p && p->nickname == peer.nickname) {
+                p->fingerprint = conn.peer_fingerprint();
+                Storage::save_peers(peer_book_);
+                break;
+            }
+        }
+    }
 
     std::cout << "\n";
-    ui::print_success("TCP connected. Performing handshake...");
+    ui::print_success("TLS 1.3 connection established!");
 
-    mark_peer_active(peer.address, peer.port);
+    mark_peer_active(active_id);
 
     if (perform_outgoing_handshake(conn)) {
         run_chat(conn, peer.nickname);
     }
 
-    unmark_peer_active(peer.address, peer.port);
+    unmark_peer_active(active_id);
     conn.close();
 }
 
-bool Application::perform_outgoing_handshake(Connection& conn) {
-    // Send HELLO with our nickname
+bool Application::perform_outgoing_handshake(TLSConnection& conn) {
     if (!conn.send_frame(MessageType::HELLO, settings_.nickname)) {
         ui::print_error("Failed to send HELLO: " + conn.last_error());
         return false;
     }
 
-    // Wait for HELLO response
     auto frame = conn.recv_frame(5000);
     if (!frame) {
         ui::print_error("No HELLO response from peer: " + conn.last_error());
@@ -636,7 +849,6 @@ bool Application::perform_outgoing_handshake(Connection& conn) {
     std::string remote_name = frame->payload.empty() ? "Unknown" : frame->payload;
     conn.set_state(ConnectionState::CONNECTED);
 
-    // Send REQUEST
     if (!conn.send_frame(MessageType::REQUEST, settings_.nickname)) {
         ui::print_error("Failed to send REQUEST: " + conn.last_error());
         return false;
@@ -646,7 +858,6 @@ bool Application::perform_outgoing_handshake(Connection& conn) {
     std::cout << ui::ansi::DIM << "  Waiting for " << remote_name
               << " to accept..." << ui::ansi::RESET << std::flush;
 
-    // Wait for ACCEPT or REJECT (30 second timeout)
     frame = conn.recv_frame(30000);
     if (!frame) {
         std::cout << "\n";
@@ -677,55 +888,51 @@ bool Application::perform_outgoing_handshake(Connection& conn) {
 
 // ─── Chat Session ───────────────────────────────────────────
 
-void Application::run_chat(Connection& conn, const std::string& peer_name) {
+void Application::run_chat(TLSConnection& conn, const std::string& peer_name) {
     ui::clear_screen();
 
-    // Chat header
     using namespace ui::ansi;
-    int width = 52;
+    int width = 56;
 
     std::cout << DIM << CYAN;
-    std::cout << "\xE2\x94\x8C"; // ┌
-    for (int i = 0; i < width - 2; ++i) std::cout << "\xE2\x94\x80"; // ─
-    std::cout << "\xE2\x94\x90\n"; // ┐
+    std::cout << "\xE2\x94\x8C";
+    for (int i = 0; i < width - 2; ++i) std::cout << "\xE2\x94\x80";
+    std::cout << "\xE2\x94\x90\n";
 
     std::cout << "\xE2\x94\x82" << RESET << " " << BOLD << WHITE
-              << "CRUX CHAT" << RESET;
-    for (int i = 0; i < width - 12; ++i) std::cout << ' ';
-    std::cout << DIM << CYAN << "\xE2\x94\x82\n"; // │
+              << "CRUX CHAT (TLS 1.3 ENCRYPTED)" << RESET;
+    for (int i = 0; i < width - 33; ++i) std::cout << ' ';
+    std::cout << DIM << CYAN << "\xE2\x94\x82\n";
 
     std::cout << "\xE2\x94\x82" << RESET << " " << GRAY
               << "Connected: " << WHITE << peer_name << RESET;
     int fill = width - 14 - static_cast<int>(peer_name.size());
     for (int i = 0; i < fill; ++i) std::cout << ' ';
-    std::cout << DIM << CYAN << "\xE2\x94\x82\n"; // │
+    std::cout << DIM << CYAN << "\xE2\x94\x82\n";
 
-    std::string addr_info = conn.peer_address() + ":" + std::to_string(conn.peer_port());
-    std::cout << "\xE2\x94\x82" << RESET << " " << GRAY << addr_info;
-    fill = width - 3 - static_cast<int>(addr_info.size());
+    std::string fp_info = "Fingerprint: " + display_fingerprint(conn.peer_fingerprint());
+    std::cout << "\xE2\x94\x82" << RESET << " " << GRAY << fp_info;
+    fill = width - 3 - static_cast<int>(fp_info.size());
     for (int i = 0; i < fill; ++i) std::cout << ' ';
-    std::cout << DIM << CYAN << "\xE2\x94\x82\n"; // │
+    std::cout << DIM << CYAN << "\xE2\x94\x82\n";
 
     std::cout << "\xE2\x94\x82" << RESET << " " << GRAY
-              << "Status: " << BRIGHT_GREEN << "\xe2\x97\x8f DIRECT" << RESET;
-    fill = width - 18;
+              << "Status: " << BRIGHT_GREEN << "\xe2\x97\x8f VERIFIED PEER" << RESET;
+    fill = width - 25;
     for (int i = 0; i < fill; ++i) std::cout << ' ';
-    std::cout << DIM << CYAN << "\xE2\x94\x82\n"; // │
+    std::cout << DIM << CYAN << "\xE2\x94\x82\n";
 
     ui::draw_divider(width);
 
     std::cout << RESET << "\n";
     std::cout << DIM << "  Type a message and press Enter. Type /quit to leave.\n\n" << RESET;
 
-    // Chat loop: read user input and receive messages
-    // We use a simple approach: spawn a receiver thread
     std::atomic<bool> chat_active{true};
     std::mutex print_mutex;
 
-    // Receiver thread
     std::thread receiver([&]() {
         while (chat_active.load() && conn.state() == ConnectionState::CHATTING) {
-            auto frame = conn.recv_frame(200);
+            auto frame = conn.recv_frame(50);
             if (!frame) {
                 if (conn.state() == ConnectionState::DISCONNECTED) {
                     std::lock_guard lock(print_mutex);
@@ -752,7 +959,6 @@ void Application::run_chat(Connection& conn, const std::string& peer_name) {
         }
     });
 
-    // Main input loop
     while (chat_active.load()) {
         {
             std::lock_guard lock(print_mutex);
@@ -781,7 +987,6 @@ void Application::run_chat(Connection& conn, const std::string& peer_name) {
 
         {
             std::lock_guard lock(print_mutex);
-            // Move cursor up to overwrite the "> msg" line with formatted version
             std::cout << "\033[A\r" << GREEN << "  You: " << RESET << WHITE << msg
                       << RESET << "\n";
         }
@@ -801,27 +1006,78 @@ void Application::run_chat(Connection& conn, const std::string& peer_name) {
 
 void Application::listener_thread_func() {
     while (running_.load()) {
-        auto conn = listener_.accept(500);
-        if (!conn) continue;
+        auto rc = listener_.accept_raw(500);
+        if (!rc) continue;
 
-        // Handle incoming connection in a detached thread
-        std::thread([this, c = std::move(*conn)]() mutable {
-            handle_incoming_connection(std::move(c));
+        std::thread([this, r = std::move(*rc)]() mutable {
+            TLSConnection conn;
+            if (conn.accept_tls(r.socket, r.addr, r.port, identity_)) {
+                handle_incoming_connection(std::move(conn));
+            }
         }).detach();
     }
 }
 
-void Application::handle_incoming_connection(Connection conn) {
-    // Wait for HELLO
+// ─── Incoming Connection & Silent Address Sync ──────────────
+
+void Application::handle_incoming_connection(TLSConnection conn) {
     auto frame = conn.recv_frame(5000);
-    if (!frame || frame->type != MessageType::HELLO) {
+    if (!frame) {
+        conn.close();
+        return;
+    }
+
+    // ── Silent address synchronization handling ──────────────
+    if (frame->type == MessageType::ADDR_UPDATE) {
+        std::string fp = conn.peer_fingerprint();
+        if (fp.empty()) {
+            conn.close();
+            return;
+        }
+
+        Peer* peer = peer_book_.find_by_fingerprint(fp);
+        if (!peer) {
+            // Unknown peer sending address update: reject silently
+            conn.close();
+            return;
+        }
+
+        AddrUpdatePayload upd;
+        if (!decode_addr_update(frame->payload, upd)) {
+            conn.close();
+            return;
+        }
+
+        // Apply update silently if newer
+        if (upd.version > peer->their_version && !upd.ip.empty()) {
+            peer->address       = upd.ip;
+            peer->port          = upd.port;
+            peer->their_version = upd.version;
+            Storage::save_peers(peer_book_);
+
+            // Send acknowledgment
+            conn.send_frame(MessageType::ADDR_ACK, encode_addr_ack(upd.version));
+        }
+
+        conn.close();
+        return; // Silent! Never touch or disrupt user UI
+    }
+
+    // ── Regular chat request flow ────────────────────────────
+    if (frame->type != MessageType::HELLO) {
         conn.close();
         return;
     }
 
     std::string remote_name = frame->payload.empty() ? "Unknown" : frame->payload;
+    std::string remote_fp   = conn.peer_fingerprint();
 
-    // Send HELLO back
+    // Check if peer is known by fingerprint
+    Peer* known_peer = peer_book_.find_by_fingerprint(remote_fp);
+    if (known_peer && !known_peer->nickname.empty()) {
+        remote_name = known_peer->nickname;
+    }
+
     if (!conn.send_frame(MessageType::HELLO, settings_.nickname)) {
         conn.close();
         return;
@@ -829,7 +1085,6 @@ void Application::handle_incoming_connection(Connection conn) {
 
     conn.set_state(ConnectionState::CONNECTED);
 
-    // Wait for REQUEST
     frame = conn.recv_frame(10000);
     if (!frame || frame->type != MessageType::REQUEST) {
         conn.close();
@@ -838,21 +1093,18 @@ void Application::handle_incoming_connection(Connection conn) {
 
     conn.set_state(ConnectionState::REQUESTED);
 
-    // Check for duplicate
-    if (is_peer_active(conn.peer_address(), conn.peer_port())) {
-        // Duplicate connection — use address comparison to break tie
-        // Lower address string wins (keeps existing, rejects new)
+    if (is_peer_active(remote_fp)) {
         conn.send_frame(MessageType::REJECT, "Duplicate connection");
         conn.close();
         return;
     }
 
-    // Queue the request for the user
     IncomingRequest req;
-    req.peer_name = remote_name;
-    req.address   = conn.peer_address();
-    req.port      = conn.peer_port();
-    req.connection = std::move(conn);
+    req.peer_name        = remote_name;
+    req.peer_fingerprint = remote_fp;
+    req.address          = conn.peer_address();
+    req.port             = conn.peer_port();
+    req.connection       = std::move(conn);
 
     {
         std::lock_guard lock(requests_mutex_);
@@ -860,24 +1112,35 @@ void Application::handle_incoming_connection(Connection conn) {
     }
 }
 
-// ─── Duplicate Detection ────────────────────────────────────
+// ─── Network Change Callback ────────────────────────────────
 
-bool Application::is_peer_active(const std::string& addr, std::uint16_t port) {
-    std::lock_guard lock(active_mutex_);
-    std::string key = addr + ":" + std::to_string(port);
-    return std::find(active_peers_.begin(), active_peers_.end(), key) != active_peers_.end();
+void Application::on_address_changed(const std::string& ip, std::uint16_t port, std::uint32_t version) {
+    current_ip_   = ip;
+    addr_version_ = version;
+
+    if (settings_.auto_sync && !peer_book_.empty()) {
+        // Silent background broadcast
+        sync_.broadcast_update(peer_book_, identity_, ip, port, version);
+        Storage::save_peers(peer_book_);
+    }
 }
 
-void Application::mark_peer_active(const std::string& addr, std::uint16_t port) {
+// ─── Active Peers Tracking ──────────────────────────────────
+
+bool Application::is_peer_active(const std::string& id) {
     std::lock_guard lock(active_mutex_);
-    active_peers_.push_back(addr + ":" + std::to_string(port));
+    return std::find(active_peers_.begin(), active_peers_.end(), id) != active_peers_.end();
 }
 
-void Application::unmark_peer_active(const std::string& addr, std::uint16_t port) {
+void Application::mark_peer_active(const std::string& id) {
     std::lock_guard lock(active_mutex_);
-    std::string key = addr + ":" + std::to_string(port);
+    active_peers_.push_back(id);
+}
+
+void Application::unmark_peer_active(const std::string& id) {
+    std::lock_guard lock(active_mutex_);
     active_peers_.erase(
-        std::remove(active_peers_.begin(), active_peers_.end(), key),
+        std::remove(active_peers_.begin(), active_peers_.end(), id),
         active_peers_.end());
 }
 

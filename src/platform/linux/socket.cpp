@@ -5,6 +5,7 @@
 #include <cstring>
 #include <string>
 #include <poll.h>
+#include <netinet/tcp.h>
 
 namespace crux::platform {
 
@@ -123,6 +124,11 @@ bool socket_set_nonblocking(Socket s, bool nonblocking) {
     if (nonblocking) flags |= O_NONBLOCK;
     else flags &= ~O_NONBLOCK;
     return fcntl(s, F_SETFL, flags) == 0;
+}
+
+bool socket_set_nodelay(Socket s) {
+    int opt = 1;
+    return setsockopt(s, IPPROTO_TCP, TCP_NODELAY, &opt, sizeof(opt)) == 0;
 }
 
 int socket_poll_read(Socket s, int timeout_ms) {

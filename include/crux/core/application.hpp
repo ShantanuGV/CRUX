@@ -3,9 +3,12 @@
 #include "crux/core/peer.hpp"
 #include "crux/core/settings.hpp"
 #include "crux/core/state.hpp"
-#include "crux/network/connection.hpp"
+#include "crux/identity/identity.hpp"
+#include "crux/network/tls_connection.hpp"
 #include "crux/protocol/frame.hpp"
 #include "crux/nat/nat.hpp"
+#include "crux/sync/address_sync.hpp"
+#include "crux/updater/updater.hpp"
 
 #include <atomic>
 #include <mutex>
@@ -17,10 +20,11 @@ namespace crux {
 
 // Incoming connection request awaiting user action
 struct IncomingRequest {
-    Connection    connection;
-    std::string   peer_name;  // From HELLO payload
-    std::string   address;
-    std::uint16_t port = 0;
+    TLSConnection  connection;
+    std::string    peer_name;         // From HELLO payload
+    std::string    peer_fingerprint;  // TLS certificate fingerprint
+    std::string    address;
+    std::uint16_t  port = 0;
 };
 
 class Application {
@@ -41,43 +45,55 @@ private:
     void show_requests_menu();
     void show_people_menu();
     void show_settings_menu();
+    void show_network_status();
 
     // ─── People management ──────────────────────────────
     void add_peer();
     void edit_peer();
     void delete_peer();
+    void sync_peers(const std::string& specific_peer = "");
 
     // ─── Connection flow ────────────────────────────────
     void connect_to_peer(const Peer& peer);
-    void run_chat(Connection& conn, const std::string& peer_name);
+    void run_chat(TLSConnection& conn, const std::string& peer_name);
 
-    // ─── Listener thread ────────────────────────────────
+    // ─── Listener & background threads ──────────────────
     void listener_thread_func();
 
-    // ─── Protocol handshake ─────────────────────────────
-    bool perform_outgoing_handshake(Connection& conn);
-    void handle_incoming_connection(Connection conn);
+    // ─── Protocol handshake & event handlers ────────────
+    bool perform_outgoing_handshake(TLSConnection& conn);
+    void handle_incoming_connection(TLSConnection conn);
+    void on_address_changed(const std::string& ip, std::uint16_t port, std::uint32_t version);
+
+    // Short fingerprint format for UI (first 16 chars)
+    static std::string display_fingerprint(const std::string& fp);
 
     // ─── State ──────────────────────────────────────────
-    Settings       settings_;
-    PeerBook       peer_book_;
-    Listener       listener_;
-    nat::NATTraversal nat_;
+    Settings             settings_;
+    PeerBook             peer_book_;
+    identity::KeyPair    identity_;
+    TLSListener          listener_;
+    nat::NATTraversal    nat_;
+    nat::AddressMonitor  address_monitor_;
+    sync::AddressSync    sync_;
+
+    std::uint32_t        addr_version_ = 1;
+    std::string          current_ip_;
 
     // Incoming requests queue
-    std::mutex                     requests_mutex_;
-    std::vector<IncomingRequest>   incoming_requests_;
+    std::mutex                   requests_mutex_;
+    std::vector<IncomingRequest> incoming_requests_;
 
     // Listener thread
-    std::thread    listener_thread_;
-    std::atomic<bool> running_{false};
+    std::thread                  listener_thread_;
+    std::atomic<bool>            running_{false};
 
-    // Active connection tracking for duplicate detection
-    std::mutex         active_mutex_;
-    std::vector<std::string> active_peers_; // "address:port" strings
-    bool is_peer_active(const std::string& addr, std::uint16_t port);
-    void mark_peer_active(const std::string& addr, std::uint16_t port);
-    void unmark_peer_active(const std::string& addr, std::uint16_t port);
+    // Active connection tracking (by fingerprint or "addr:port")
+    std::mutex                   active_mutex_;
+    std::vector<std::string>     active_peers_;
+    bool is_peer_active(const std::string& id);
+    void mark_peer_active(const std::string& id);
+    void unmark_peer_active(const std::string& id);
 };
 
 } // namespace crux

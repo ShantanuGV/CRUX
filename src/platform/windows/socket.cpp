@@ -137,6 +137,12 @@ bool socket_set_nonblocking(Socket s, bool nonblocking) {
     return ioctlsocket(s, FIONBIO, &mode) == 0;
 }
 
+bool socket_set_nodelay(Socket s) {
+    int opt = 1;
+    return setsockopt(s, IPPROTO_TCP, TCP_NODELAY,
+                      reinterpret_cast<const char*>(&opt), sizeof(opt)) == 0;
+}
+
 int socket_poll_read(Socket s, int timeout_ms) {
     fd_set read_fds;
     FD_ZERO(&read_fds);

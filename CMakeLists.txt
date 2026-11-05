@@ -1,16 +1,19 @@
 cmake_minimum_required(VERSION 3.16)
 
 project(crux
-    VERSION 1.0.0
+    VERSION 1.1.0
     LANGUAGES CXX
-    DESCRIPTION "CRUX - Direct Peer-to-Peer TCP CLI Messenger"
+    DESCRIPTION "CRUX - Encrypted Direct Peer-to-Peer Messenger"
 )
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-# ─── Main executable ────────────────────────────────────────
+# ─── OpenSSL ─────────────────────────────────────────────────
+find_package(OpenSSL REQUIRED)
+
+# ─── Main executable ─────────────────────────────────────────
 
 set(CRUX_SOURCES
     src/main.cpp
@@ -18,10 +21,14 @@ set(CRUX_SOURCES
     src/core/peer.cpp
     src/core/state.cpp
     src/network/connection.cpp
+    src/network/tls_connection.cpp
     src/protocol/frame.cpp
     src/storage/storage.cpp
     src/ui/terminal.cpp
     src/nat/nat.cpp
+    src/identity/identity.cpp
+    src/sync/address_sync.cpp
+    src/updater/updater.cpp
 )
 
 # Platform-specific sources
@@ -40,13 +47,13 @@ target_include_directories(crux
 
 # Platform-specific link libraries
 if(WIN32)
-    target_link_libraries(crux PRIVATE ws2_32)
+    target_link_libraries(crux PRIVATE ws2_32 OpenSSL::SSL OpenSSL::Crypto)
 else()
     find_package(Threads REQUIRED)
-    target_link_libraries(crux PRIVATE Threads::Threads)
+    target_link_libraries(crux PRIVATE Threads::Threads OpenSSL::SSL OpenSSL::Crypto)
 endif()
 
-# ─── Tests ──────────────────────────────────────────────────
+# ─── Tests ───────────────────────────────────────────────────
 
 enable_testing()
 
@@ -57,13 +64,18 @@ set(TEST_SOURCES
     tests/test_state.cpp
     tests/test_storage.cpp
     tests/test_network.cpp
+    tests/test_identity.cpp
+    tests/test_addr_sync.cpp
     # Shared sources needed by tests
     src/core/peer.cpp
     src/core/state.cpp
     src/protocol/frame.cpp
     src/storage/storage.cpp
     src/network/connection.cpp
+    src/network/tls_connection.cpp
     src/nat/nat.cpp
+    src/identity/identity.cpp
+    src/sync/address_sync.cpp
 )
 
 if(WIN32)
@@ -80,15 +92,15 @@ target_include_directories(crux_tests
 )
 
 if(WIN32)
-    target_link_libraries(crux_tests PRIVATE ws2_32)
+    target_link_libraries(crux_tests PRIVATE ws2_32 OpenSSL::SSL OpenSSL::Crypto)
 else()
     find_package(Threads REQUIRED)
-    target_link_libraries(crux_tests PRIVATE Threads::Threads)
+    target_link_libraries(crux_tests PRIVATE Threads::Threads OpenSSL::SSL OpenSSL::Crypto)
 endif()
 
 add_test(NAME crux_tests COMMAND crux_tests)
 
-# ─── Install ────────────────────────────────────────────────
+# ─── Install ─────────────────────────────────────────────────
 
 install(TARGETS crux
     RUNTIME DESTINATION bin

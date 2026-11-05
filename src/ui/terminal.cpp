@@ -123,14 +123,14 @@ void draw_status_bar(const std::string& status, int peer_count, int request_coun
 
     // Status
     std::cout << "\xE2\x94\x82" << RESET << " "; // │
-    std::cout << GRAY << "STATUS   " << BRIGHT_GREEN << BOLD << "\xe2\x97\x8f " << status << RESET;
+    std::cout << GRAY << "STATUS    " << BRIGHT_GREEN << BOLD << "\xe2\x97\x8f " << status << RESET;
     int fill = width - 15 - static_cast<int>(status.size());
     for (int i = 0; i < fill; ++i) std::cout << ' ';
     std::cout << DIM << CYAN << "\xE2\x94\x82\n"; // │
 
     // Network
     std::cout << "\xE2\x94\x82" << RESET << " "; // │
-    std::cout << GRAY << "NETWORK  " << WHITE << "TCP" << GRAY << "  PORT " << WHITE << port << RESET;
+    std::cout << GRAY << "NETWORK   " << WHITE << "TCP" << GRAY << "  PORT " << WHITE << port << RESET;
     std::string port_str = std::to_string(port);
     fill = width - 23 - static_cast<int>(port_str.size());
     for (int i = 0; i < fill; ++i) std::cout << ' ';
@@ -207,6 +207,32 @@ int read_int() {
     } catch (...) {
         return -1;
     }
+}
+
+void print_fingerprint(const std::string& label, const std::string& fingerprint) {
+    using namespace ansi;
+    if (!label.empty()) {
+        std::cout << "  " << GRAY << label << ": " << RESET << "\n";
+    }
+    std::cout << "    " << BOLD << CYAN;
+    // Format into groups of 8 characters separated by space
+    for (std::size_t i = 0; i < fingerprint.size(); ++i) {
+        if (i > 0 && i % 8 == 0) {
+            std::cout << (i % 32 == 0 ? "\n    " : " ");
+        }
+        std::cout << fingerprint[i];
+    }
+    std::cout << RESET << "\n";
+    std::cout << "    " << DIM << GRAY << "Raw: " << RESET << CYAN << fingerprint << RESET << "\n";
+}
+
+void print_sync_status(const std::string& peer_name, bool synced) {
+    using namespace ansi;
+    std::cout << "  "
+              << (synced ? BRIGHT_GREEN : YELLOW)
+              << (synced ? "\xe2\x9c\x93 " : "\xe2\x97\x8b ")
+              << RESET << WHITE << peer_name << RESET
+              << GRAY << (synced ? "  (synchronized)" : "  (pending update)") << RESET << "\n";
 }
 
 } // namespace crux::ui

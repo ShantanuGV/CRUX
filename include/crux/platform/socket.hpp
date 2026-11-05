@@ -57,6 +57,7 @@ int socket_recv(Socket s, void* buf, std::size_t len);
 // Options
 bool socket_set_reuse_addr(Socket s);
 bool socket_set_nonblocking(Socket s, bool nonblocking);
+bool socket_set_nodelay(Socket s);
 
 // Poll helpers — returns >0 if data ready, 0 on timeout, -1 on error
 int socket_poll_read(Socket s, int timeout_ms);

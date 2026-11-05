@@ -1,19 +1,33 @@
 # CRUX
 
-**Direct peer-to-peer TCP CLI messenger.**
+**Encrypted Direct Peer-to-Peer CLI Messenger.**
 
-No central server. No cloud database. No message history.
-Just two endpoints, a protocol, and a direct connection.
+No central server. No cloud database. No message history.  
+Just two endpoints, TLS 1.3 encryption, and direct communication.
 
 ```
-         CRUX A                     CRUX B
-      ┌───────────┐             ┌───────────┐
-      │ listener  │   direct    │ listener  │
-      │ connector │◄────TCP────►│ connector │
-      └───────────┘             └───────────┘
+         CRUX A                                      CRUX B
+      ┌───────────┐                               ┌───────────┐
+      │ listener  │         TLS 1.3 mTLS          │ listener  │
+      │ connector │◄─────────────────────────────►│ connector │
+      │ (Ed25519) │   Encrypted Direct Channel    │ (Ed25519) │
+      └───────────┘                               └───────────┘
 ```
 
-> ⚠️ **CRUX v1 communication is UNENCRYPTED.** Encryption is planned for a future version.
+> 🔒 **CRUX v1.1 is fully encrypted with TLS 1.3 and Ed25519 authentication.**  
+> Traffic is protected against eavesdropping and tampering. Endpoint changes are synchronized automatically and silently in the background.
+
+---
+
+## What's New in CRUX v1.1
+
+- 🛡️ **TLS 1.3 Mutual Authentication (mTLS):** Full end-to-end transport layer encryption powered by OpenSSL.
+- 🔑 **Cryptographic Identity (Ed25519):** Stable identity based on persistent asymmetric key pairs and SHA-256 fingerprints rather than ephemeral IP addresses.
+- 🤝 **Trust On First Use (TOFU):** No complex setup. Connect directly using just an IP address; identities are automatically verified and pinned on first contact.
+- 🔄 **Silent Address Synchronization:** When your IP changes, CRUX discovers the new endpoint and notifies friends in the background. Their address books update automatically with zero popups or disruptions.
+- 🚀 **Low Latency (`TCP_NODELAY`):** Real-time sub-millisecond message delivery with zero socket delays.
+- 🔌 **Default Port `5823`:** Easily customizable via `--port <PORT>` or through the in-app settings menu.
+- 📦 **Automated Updater:** Check for and install GitHub releases directly from the CLI via `crux --update`.
 
 ---
 
@@ -31,23 +45,20 @@ irm https://raw.githubusercontent.com/ShantanuGV/CRUX/main/install.ps1 | iex
 curl -sSL https://raw.githubusercontent.com/ShantanuGV/CRUX/main/install.sh | bash
 ```
 
-After installation, open a **new terminal** and type:
+After installation, open a **new terminal** and run:
 
 ```
 crux
 ```
 
-That's it. CRUX is now a system command.
-
 ### Prerequisites
 
-The installer will check for these automatically:
-
-| Tool | Windows | Linux |
-|------|---------|-------|
+| Tool | Windows | Linux / macOS |
+|------|---------|---------------|
 | Git | [git-scm.com](https://git-scm.com/download/win) | `sudo apt install git` |
 | CMake | [cmake.org](https://cmake.org/download/) or MSYS2 | `sudo apt install cmake` |
-| C++ Compiler | [MSYS2](https://www.msys2.org/) (MinGW-w64) | `sudo apt install g++` |
+| C++ Compiler (C++20) | [MSYS2](https://www.msys2.org/) (MinGW-w64) | `sudo apt install g++` |
+| OpenSSL | `pacman -S mingw-w64-ucrt-x86_64-openssl` | `sudo apt install libssl-dev` |
 | Make | Comes with MSYS2 | `sudo apt install make` |
 
 ### Uninstall
@@ -62,271 +73,153 @@ rm ~/.local/bin/crux
 
 ---
 
-## Features (V1)
+## Key Features
 
-- **Direct P2P messaging** — no central server, no cloud, no intermediaries
-- **Cross-platform** — builds on Linux and Windows from the same source
-- **Binary wire protocol** with proper message framing (handles partial reads/writes)
-- **Protocol handshake** — HELLO → REQUEST → ACCEPT/REJECT → CHAT → CLOSE
-- **Connection state machine** with validated transitions
-- **Futuristic terminal UI** with ANSI styling
-- **Address book** — save peers with nicknames and addresses (persisted automatically)
-- **Persistent settings** — configurable port and nickname
-- **No message persistence** — messages exist only in memory during a chat session
-- **Clean disconnect** handling
-- **Duplicate connection** detection and prevention
-- **Comprehensive error handling** — invalid addresses, timeouts, malformed packets, etc.
+- **Direct P2P messaging** — no central server, no relay node, no intermediaries.
+- **TLS 1.3 encryption** — mutual authentication with pinned identity certificates.
+- **Cryptographic identity** — 64-character SHA-256 fingerprint generated from an Ed25519 key pair.
+- **Zero-friction connection** — connect using just a nickname and IP/port; identity is learned automatically.
+- **Silent address synchronization** — signed `ADDR_UPDATE` (0x07) and `ADDR_ACK` (0x08) protocol frames keep peers in sync when endpoints change.
+- **Automatic address monitoring** — background interface polling detects IP changes without user intervention.
+- **UPnP NAT traversal** — automatic port forwarding and public IP discovery.
+- **Address book** — persistent contacts with nicknames, endpoints, and pinned fingerprints.
+- **No message persistence** — chat messages exist only in memory during an active session and vanish when closed.
+- **Self-updater** — check and update binaries directly from GitHub releases.
 
 ---
 
 ## What Gets Saved
 
-CRUX saves **only your contacts (people)**:
-- Nickname, IP address, and port for each peer
-- Your settings (listening port and nickname)
+CRUX saves **only your contacts and identity**:
+- Your Ed25519 private key and certificate (`identity.key` and `identity.crt`)
+- Nickname, address, port, and pinned fingerprint for each peer (`peers.conf`)
+- Your configuration settings (`settings.conf`)
 
 CRUX **never** saves:
 - Messages
 - Chat history
-- Any message content
+- Metadata or message logs
 
-Your contacts are stored locally:
-- **Windows:** `%APPDATA%\crux\peers.conf`
-- **Linux:** `~/.config/crux/peers.conf`
-
-Messages exist only in memory while a chat session is active. When you close the chat, they're gone forever.
+Storage locations:
+- **Windows:** `%APPDATA%\crux\`
+- **Linux:** `~/.config/crux/`
 
 ---
 
 ## Architecture
 
 ```
-Application (CLI, menus, chat)
+Application (CLI, menus, chat session)
     ↓
 Core (PeerBook, Settings, State Machine)
     ↓
-Network (Connection, Listener)
+Address Sync & Monitor (AddressSync, AddressMonitor)
     ↓
-Protocol (Frame encode/decode)
+Network (TLSConnection, TLSListener over OpenSSL TLS 1.3)
     ↓
-Platform Abstraction
-    ├── Linux / POSIX (sys/socket.h)
-    └── Windows / WinSock2 (ws2_32)
+Protocol (Binary framing: version, type, length, payload)
+    ↓
+Platform Abstraction (Windows WinSock2 / Linux POSIX)
 ```
-
-The application never directly calls `socket()`, `connect()`, `bind()`, `listen()`, `accept()`, `recv()`, or `send()`. All platform-specific code is isolated in `src/platform/`.
 
 ---
 
 ## Building from Source
-
-If you prefer to build manually instead of using the install scripts:
 
 ### Linux
 
 ```bash
 cmake -S . -B build
 cmake --build build
-sudo cmake --install build    # Installs to /usr/local/bin
+sudo cmake --install build
 ```
 
-### Windows (MinGW / MSYS2)
+### Windows (MSYS2 / MinGW-w64)
 
 ```powershell
 cmake -S . -B build -G "MinGW Makefiles"
 cmake --build build
-cmake --install build --prefix "$env:LOCALAPPDATA\Programs\crux"
 ```
 
-### Windows (Visual Studio)
-
-```powershell
-cmake -S . -B build
-cmake --build build --config Release
-```
-
-The executable is built at `build/crux` (Linux) or `build/crux.exe` (Windows).
+The executable will be located at `build/crux` (Linux) or `build/crux.exe` (Windows).
 
 ---
 
 ## Usage
 
-### Starting CRUX
+### Commands & Options
 
 ```bash
-# Default port (5623)
+# Start with default port (5823)
 crux
 
-# Custom port
-crux --port 8080
+# Specify custom listening port
+crux --port 5824
+
+# Specify custom data directory (ideal for running multiple instances on the same PC)
+crux --port 5824 -d ./bob_data
+
+# Display version
+crux --version
+
+# Check for updates from GitHub Releases
+crux --check-update
+
+# Automatically update to the latest release
+crux --update
+
+# Show local network configuration
+crux network status
+
+# Show peer identity & synchronization details
+crux people info <nickname>
 
 # Help
 crux --help
 ```
 
-### Main Menu
+---
 
-```
-  [1] CHAT       — Connect to a peer and start messaging
-  [2] REQUESTS   — View and accept/reject incoming connection requests
-  [3] PEOPLE     — Manage your address book (add/edit/delete peers)
-  [4] SETTINGS   — Configure port and nickname
-  [5] EXIT       — Clean shutdown
-```
+## Testing Locally (Two Instances on One PC)
 
-### Adding a Peer
+Open two terminals:
 
-Navigate to **PEOPLE → Add** and enter:
-- **Nickname** — Local alias (e.g., "Amit")
-- **Address** — IP address or hostname (e.g., "192.168.1.42")
-- **Port** — Listening port of the remote CRUX instance (default: 5623)
-
-### Starting a Chat
-
-1. Navigate to **CHAT**
-2. Select a peer from your address book
-3. CRUX connects directly via TCP
-4. The remote peer sees an incoming request
-5. If accepted, both enter the chat session
-6. Type messages and press Enter
-7. Type `/quit` to end the session
-
-### Two-Instance Local Test
-
-Terminal 1:
-```bash
-crux --port 5623
+#### Terminal 1 (Instance A — Default Port 5823)
+```powershell
+.\build\crux.exe
 ```
 
-Terminal 2:
-```bash
-crux --port 5624
+#### Terminal 2 (Instance B — Port 5824, Separate Data Directory)
+```powershell
+.\build\crux.exe --port 5824 -d .\bob_data
 ```
 
-In Terminal 2, add a peer with address `127.0.0.1` and port `5623`, then start a chat. In Terminal 1, go to **REQUESTS** and accept.
+1. In Terminal 1, go to **PEOPLE (3) → Add Person (A)**:
+   - Nickname: `bob`
+   - Address: `127.0.0.1`
+   - Port: `5824`
+2. In Terminal 1, go to **CHAT (1)** and select `bob`.
+3. In Terminal 2, go to **REQUESTS (2)** and press **[A] Accept**.
+4. Both terminals are now connected over an encrypted TLS 1.3 chat session!
 
 ---
 
-## Protocol Overview
-
-CRUX uses a binary frame protocol over TCP:
-
-```
-+---------+------+--------+---------+
-| VERSION | TYPE | LENGTH | PAYLOAD |
-+---------+------+--------+---------+
-| 1 byte  |1 byte|4 bytes | N bytes |
-+---------+------+--------+---------+
-```
-
-Message types: `HELLO`, `REQUEST`, `ACCEPT`, `REJECT`, `MESSAGE`, `CLOSE`
-
-Connection lifecycle:
-```
-A → HELLO → B
-B → HELLO → A
-A → REQUEST → B
-B → ACCEPT → A  (or REJECT)
-A ↔ MESSAGE ↔ B
-A → CLOSE → B
-```
-
-Full protocol specification: [docs/protocol.md](docs/protocol.md)
-
----
-
-## Project Structure
-
-```
-CRUX/
-├── CMakeLists.txt
-├── README.md
-├── install.ps1               # Windows installer
-├── install.sh                # Linux/macOS installer
-├── uninstall.ps1             # Windows uninstaller
-├── docs/
-│   └── protocol.md           # Wire protocol specification
-├── include/crux/
-│   ├── core/
-│   │   ├── application.hpp   # Main application orchestration
-│   │   ├── peer.hpp          # Peer data & address book
-│   │   ├── settings.hpp      # User settings
-│   │   └── state.hpp         # Connection state machine
-│   ├── network/
-│   │   └── connection.hpp    # High-level Connection & Listener
-│   ├── platform/
-│   │   └── socket.hpp        # Platform socket abstraction
-│   ├── protocol/
-│   │   └── frame.hpp         # Wire protocol frame format
-│   ├── storage/
-│   │   └── storage.hpp       # Local file persistence
-│   └── ui/
-│       └── terminal.hpp      # Terminal UI system
-├── src/
-│   ├── main.cpp
-│   ├── core/
-│   ├── network/
-│   ├── protocol/
-│   ├── storage/
-│   ├── ui/
-│   └── platform/
-│       ├── linux/socket.cpp  # POSIX socket implementation
-│       └── windows/socket.cpp# WinSock2 implementation
-└── tests/
-    ├── test_framework.hpp    # Minimal test framework
-    ├── test_main.cpp
-    ├── test_frame.cpp        # Protocol frame tests
-    ├── test_peer.cpp         # Peer management tests
-    ├── test_state.cpp        # State machine tests
-    ├── test_storage.cpp      # Persistence tests
-    └── test_network.cpp      # Network integration tests
-```
-
----
-
-## Security Limitations
-
-**CRUX v1 does NOT provide:**
-
-- Encryption — all messages are plaintext over TCP
-- Authentication — no identity verification
-- Integrity — no message authentication codes
-- NAT traversal — both peers must be directly reachable
-
-**Do not use CRUX v1 for sensitive communications.**
-
-Future versions will implement end-to-end encryption.
-
----
-
-## Running Tests
+## Running the Test Suite
 
 ```bash
-cmake -S . -B build
-cmake --build build
-./build/crux_tests        # Linux
-.\build\crux_tests.exe    # Windows
+# Windows
+.\build\crux_tests.exe
+
+# Linux
+./build/crux_tests
 ```
 
-Tests cover:
-- Protocol frame encoding/decoding (valid, partial, invalid, oversized)
-- Peer management (add, edit, delete, bounds)
-- Connection state machine (valid/invalid transitions)
-- Storage persistence (save/load roundtrip)
-- Network (listener, connect, send/recv, full handshake, disconnect detection)
-
----
-
-## Roadmap
-
-- [ ] End-to-end encryption (TLS or custom)
-- [ ] NAT traversal / hole punching
-- [ ] UDP transport option
-- [ ] File transfer
-- [ ] Group chat
-- [ ] Message acknowledgments
-- [ ] Keepalive / heartbeat
-- [ ] ncurses / full TUI interface
+All 220 tests verify:
+- Cryptographic identity generation, determinism, and Ed25519 sign/verify
+- Signed address update encoding, decoding, and ACK flow
+- Mutual TLS connections, fingerprint matching, and socket I/O
+- Frame encoding/decoding and error handling
+- Peer book management and persistence
 
 ---
 

@@ -489,4 +489,78 @@ std::string NATTraversal::xml_find_tag(const std::string& xml,
     return "";
 }
 
+// ═══════════════════════════════════════════════════════════════
+//  AddressMonitor
+// ═══════════════════════════════════════════════════════════════
+
+AddressMonitor::~AddressMonitor() {
+    stop();
+}
+
+void AddressMonitor::start(std::uint16_t port, ChangeCallback on_change) {
+    port_     = port;
+    callback_ = std::move(on_change);
+
+    // Discover initial IP
+    {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        last_ip_ = discover_local_ip();
+        version_ = 1;
+    }
+
+    running_ = true;
+    thread_  = std::thread(&AddressMonitor::monitor_loop, this);
+}
+
+void AddressMonitor::stop() {
+    running_ = false;
+    if (thread_.joinable()) thread_.join();
+}
+
+std::string AddressMonitor::current_ip() const {
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    return last_ip_;
+}
+
+std::uint32_t AddressMonitor::current_version() const {
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    return version_;
+}
+
+std::string AddressMonitor::discover_local_ip() {
+    // Use the platform helper
+    std::string ip = crux::platform::get_local_ip();
+    if (ip.empty() || ip == "0.0.0.0") return "127.0.0.1";
+    return ip;
+}
+
+void AddressMonitor::monitor_loop() {
+    // Poll every 10 seconds for address changes
+    while (running_.load()) {
+        for (int i = 0; i < 100 && running_.load(); ++i) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
+        if (!running_.load()) break;
+
+        std::string new_ip = discover_local_ip();
+
+        std::uint32_t new_version = 0;
+        bool changed = false;
+
+        {
+            std::lock_guard<std::mutex> lock(state_mutex_);
+            if (new_ip != last_ip_ && !new_ip.empty()) {
+                last_ip_ = new_ip;
+                ++version_;
+                new_version = version_;
+                changed = true;
+            }
+        }
+
+        if (changed && callback_) {
+            callback_(new_ip, port_, new_version);
+        }
+    }
+}
+
 } // namespace crux::nat

@@ -2,6 +2,11 @@
 
 #include <cstdint>
 #include <string>
+#include <functional>
+#include <thread>
+#include <atomic>
+#include <mutex>
+#include <chrono>
 
 namespace crux::nat {
 
@@ -76,6 +81,48 @@ private:
     // Track if we created a mapping (so we can remove it)
     bool mapping_active_ = false;
     std::uint16_t mapped_port_ = 0;
+};
+
+// ─── Address Monitor ───────────────────────────────────────────────────────
+// Monitors the local network interface for address changes.
+// When the active endpoint changes, increments the address version
+// and calls the registered callback — which triggers silent sync.
+class AddressMonitor {
+public:
+    // Callback: (new_ip, port, new_version)
+    using ChangeCallback = std::function<void(
+        const std::string& new_ip,
+        std::uint16_t port,
+        std::uint32_t new_version)>;
+
+    AddressMonitor() = default;
+    ~AddressMonitor();
+
+    AddressMonitor(const AddressMonitor&) = delete;
+    AddressMonitor& operator=(const AddressMonitor&) = delete;
+
+    // Start monitoring. Callback is invoked on the monitor thread.
+    void start(std::uint16_t port, ChangeCallback on_change);
+
+    // Stop monitoring and join the thread.
+    void stop();
+
+    std::string   current_ip()      const;
+    std::uint32_t current_version() const;
+
+private:
+    void monitor_loop();
+
+    // Returns the best available local IP (prefers non-loopback).
+    std::string discover_local_ip();
+
+    std::thread            thread_;
+    std::atomic<bool>      running_{false};
+    mutable std::mutex     state_mutex_;
+    std::string            last_ip_;
+    std::uint32_t          version_{0};
+    ChangeCallback         callback_;
+    std::uint16_t          port_ = 0;
 };
 
 } // namespace crux::nat

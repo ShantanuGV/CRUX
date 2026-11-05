@@ -8,7 +8,7 @@
 namespace crux {
 
 // Wire protocol version
-constexpr std::uint8_t PROTOCOL_VERSION = 1;
+constexpr std::uint8_t PROTOCOL_VERSION = 2;  // V1.1 uses version 2
 
 // Maximum payload size: 64 KiB (prevents memory exhaustion)
 constexpr std::uint32_t MAX_PAYLOAD_SIZE = 65536;
@@ -17,12 +17,26 @@ constexpr std::uint32_t MAX_PAYLOAD_SIZE = 65536;
 constexpr std::size_t FRAME_HEADER_SIZE = 6;
 
 enum class MessageType : std::uint8_t {
+    // ── Chat session (unchanged from V1) ─────────────────────
     HELLO   = 0x01,
     REQUEST = 0x02,
     ACCEPT  = 0x03,
     REJECT  = 0x04,
     MESSAGE = 0x05,
     CLOSE   = 0x06,
+
+    // ── Address synchronization (new in V1.1) ─────────────────
+    // ADDR_UPDATE payload:
+    //   version(4 bytes, big-endian)
+    //   ip_len(1 byte)
+    //   ip(ip_len bytes, ASCII)
+    //   port(2 bytes, big-endian)
+    //   signature(64 bytes, Ed25519 over version||ip||port)
+    ADDR_UPDATE = 0x07,
+
+    // ADDR_ACK payload:
+    //   version(4 bytes, big-endian) — the version being acknowledged
+    ADDR_ACK    = 0x08,
 };
 
 // Returns human-readable name for a message type
@@ -57,5 +71,27 @@ struct DecodeResult {
 // Returns how many bytes were consumed. If a full frame isn't yet
 // available, consumed == 0 and frame is nullopt (not an error).
 DecodeResult frame_decode(const std::uint8_t* data, std::size_t length);
+
+// ─── ADDR_UPDATE helpers ────────────────────────────────────
+
+struct AddrUpdatePayload {
+    std::uint32_t version = 0;
+    std::string   ip;
+    std::uint16_t port = 0;
+    std::vector<std::uint8_t> signature; // 64 bytes Ed25519
+};
+
+// Encode an AddrUpdatePayload into a string suitable as Frame::payload
+std::string encode_addr_update(const AddrUpdatePayload& p);
+
+// Decode an AddrUpdatePayload from a Frame::payload string
+// Returns false if malformed
+bool decode_addr_update(const std::string& payload, AddrUpdatePayload& out);
+
+// Encode an ADDR_ACK payload (just the 4-byte version)
+std::string encode_addr_ack(std::uint32_t version);
+
+// Decode an ADDR_ACK payload
+bool decode_addr_ack(const std::string& payload, std::uint32_t& out_version);
 
 } // namespace crux

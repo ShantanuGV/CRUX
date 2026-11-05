@@ -19,3 +19,8 @@ out/
 # OS
 .DS_Store
 Thumbs.db
+
+# Backup and test data
+*.bak
+*.old
+*_data/
