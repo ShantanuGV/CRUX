@@ -218,6 +218,11 @@ UpdateInfo Updater::check() {
 
     std::string tag = json_field(json, "tag_name");
     if (tag.empty()) {
+        if (json.find("Not Found") != std::string::npos) {
+            info.update_available = false;
+            info.latest_version   = CRUX_VERSION_STRING;
+            return info;
+        }
         info.error = "Could not parse release information.";
         return info;
     }

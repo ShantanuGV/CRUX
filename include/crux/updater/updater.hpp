@@ -13,7 +13,7 @@ constexpr const char* CRUX_VERSION_STRING = "1.1.0";
 
 // GitHub repository for release checks
 constexpr const char* CRUX_GITHUB_API_HOST   = "api.github.com";
-constexpr const char* CRUX_GITHUB_API_PATH   = "/repos/crux-messenger/crux/releases/latest";
+constexpr const char* CRUX_GITHUB_API_PATH   = "/repos/ShantanuGV/CRUX/releases/latest";
 constexpr std::uint16_t CRUX_GITHUB_API_PORT = 443;
 
 struct UpdateInfo {
